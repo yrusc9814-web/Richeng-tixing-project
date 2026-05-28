@@ -1,0 +1,37 @@
+@REM Phase 12 — Windows Scheduled Task template.
+@REM
+@REM This is a reference template for creating a Windows Scheduled Task
+@REM via schtasks.exe or Task Scheduler GUI. It runs sync-pending every
+@REM 5 minutes.
+@REM
+@REM Usage:
+@REM   1. Replace {{PROJECT_ROOT}} with the absolute path to hermes-agent
+@REM      (e.g. D:\hermes-agent)
+@REM   2. Replace {{PYTHON}} with the python.exe path
+@REM      (e.g. D:\hermes-agent\.venv\Scripts\python.exe)
+@REM   3. Replace {{USERNAME}} with the Windows user account
+@REM
+@REM Create:
+@REM   schtasks /create /tn "LocalAPI Sync Trigger" ^
+@REM     /tr "{{PYTHON}} -m local_api.scripts.sync_trigger sync-pending --limit 10" ^
+@REM     /sc minute /mo 5 ^
+@REM     /ru {{USERNAME}} ^
+@REM     /f
+@REM
+@REM Dry-run variant:
+@REM   schtasks /create /tn "LocalAPI Sync Trigger (dry-run)" ^
+@REM     /tr "{{PYTHON}} -m local_api.scripts.sync_trigger sync-pending --limit 10 --dry-run" ^
+@REM     /sc minute /mo 30 ^
+@REM     /ru {{USERNAME}} ^
+@REM     /f
+@REM
+@REM Delete:
+@REM   schtasks /delete /tn "LocalAPI Sync Trigger" /f
+@REM
+@REM Query:
+@REM   schtasks /query /tn "LocalAPI Sync Trigger"
+@REM
+@REM Logs are written to: %TEMP%\sync_trigger_schtask.log
+@REM (adjust StandardOutPath if using XML import)
+@REM
+@REM DO NOT execute — reference only.

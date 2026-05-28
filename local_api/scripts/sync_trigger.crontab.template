@@ -1,0 +1,27 @@
+# Phase 12 — crontab template for sync trigger.
+#
+# Replaces:
+#   {{PROJECT_ROOT}}  → absolute path to the hermes-agent repo
+#   {{PYTHON}}        → python3 interpreter (e.g. /usr/local/bin/python3,
+#                        or the venv: {{PROJECT_ROOT}}/.venv/bin/python3)
+#
+# Install (DO NOT execute — reference only):
+#   1. Edit this file: replace {{PROJECT_ROOT}} and {{PYTHON}}
+#   2. crontab sync_trigger.crontab.template
+#   3. crontab -l   # verify it's loaded
+#
+# Uninstall:
+#   crontab -r      # remove all cron jobs (careful!)
+#   # or edit with: crontab -e
+
+# Every 5 minutes (production)
+*/5 * * * * {{PYTHON}} -m local_api.scripts.sync_trigger sync-pending --limit 10 >> {{PROJECT_ROOT}}/local_api/logs/sync_trigger_cron.log 2>&1
+
+# Every 15 minutes (conservative)
+# */15 * * * * {{PYTHON}} -m local_api.scripts.sync_trigger sync-pending --limit 10 >> {{PROJECT_ROOT}}/local_api/logs/sync_trigger_cron.log 2>&1
+
+# Daily at 9:00 AM
+# 0 9 * * * {{PYTHON}} -m local_api.scripts.sync_trigger sync-pending --limit 10 >> {{PROJECT_ROOT}}/local_api/logs/sync_trigger_cron.log 2>&1
+
+# Dry-run (validation only, no external sync) — every 30 minutes
+# */30 * * * * {{PYTHON}} -m local_api.scripts.sync_trigger sync-pending --limit 10 --dry-run >> {{PROJECT_ROOT}}/local_api/logs/sync_trigger_dryrun.log 2>&1

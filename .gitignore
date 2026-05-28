@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.pytest_cache/
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+*.key
+*credential*
+*token*
+*secret*
+
+# Database & runtime - but not test fixtures
+*.sqlite
+*.db
+!local_api/test_data/
+!local_api/test_data/*
+logs/
+tmp/
+temp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build & test artifacts
+*.egg-info/
+dist/
+build/

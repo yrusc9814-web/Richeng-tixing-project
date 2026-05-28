@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Phase 12 — LaunchAgent template for sync trigger.
+
+  Replaces:
+    {{PROJECT_ROOT}}  → absolute path to the hermes-agent repo
+    {{PYTHON}}        → python3 interpreter (e.g. /usr/local/bin/python3)
+
+  Install (DO NOT execute — reference only):
+    cp sync_trigger.plist.template ~/Library/LaunchAgents/com.localapi.sync-trigger.plist
+    # Edit the plist: replace {{PROJECT_ROOT}} and {{PYTHON}}
+    launchctl load ~/Library/LaunchAgents/com.localapi.sync-trigger.plist
+
+  Uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.localapi.sync-trigger.plist
+    rm ~/Library/LaunchAgents/com.localapi.sync-trigger.plist
+
+  Dry-run (validate without external sync -- add --dry-run flag):
+    {{PYTHON}} -m local_api.scripts.sync_trigger sync-pending --limit 10 --dry-run
+
+  Check status:
+    launchctl list | grep com.localapi.sync-trigger
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.localapi.sync-trigger</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{PYTHON}}</string>
+        <string>-m</string>
+        <string>local_api.scripts.sync_trigger</string>
+        <string>sync-pending</string>
+        <string>--limit</string>
+        <string>10</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{PROJECT_ROOT}}</string>
+
+    <key>StandardOutPath</key>
+    <string>{{PROJECT_ROOT}}/local_api/logs/sync_trigger_out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{PROJECT_ROOT}}/local_api/logs/sync_trigger_err.log</string>
+
+    <!-- Run every 5 minutes (300 seconds) -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <!--
+    Alternative: run at specific times each day.
+    Replace StartInterval above with StartCalendarInterval below:
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    -->
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>ExitTimeOut</key>
+    <integer>120</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
