@@ -115,13 +115,15 @@ class TestAppleAdapterDirectSafety:
         assert result.sync_result == "success"
         assert result.external_id.startswith("test_")
 
-    def test_real_mode_on_non_macos_returns_platform_unsupported(self):
+    def test_real_mode_on_non_macos_returns_platform_unsupported(self, monkeypatch):
+        monkeypatch.setattr(AppleSyncAdapter, "_is_macos", staticmethod(lambda: False))
         adapter = AppleSyncAdapter(target="apple_calendar")
         result = adapter.push({"title": "test"}, {"sync_id": "s1", "sync_target": "apple_calendar"})
         assert result.success is False
         assert result.error_code == "platform_unsupported"
 
-    def test_validate_config_on_non_macos_returns_false(self):
+    def test_validate_config_on_non_macos_returns_false(self, monkeypatch):
+        monkeypatch.setattr(AppleSyncAdapter, "_is_macos", staticmethod(lambda: False))
         adapter = AppleSyncAdapter(target="apple_calendar")
         valid, msg = adapter.validate_config()
         assert valid is False
@@ -149,8 +151,9 @@ class TestSyncServiceIntegration:
     safety behavior — the test verifies the integration chain works.
     """
 
-    def test_apple_calendar_through_service_returns_config_error(self):
+    def test_apple_calendar_through_service_returns_config_error(self, monkeypatch):
         """SyncService routes apple_calendar, fails at validate_config on non-macOS."""
+        monkeypatch.setattr(AppleSyncAdapter, "_is_macos", staticmethod(lambda: False))
         _insert_task("task_sc_001")
         service = _make_service(dry_run=True)
         result = service.run_task_sync("task_sc_001", "apple_calendar")
@@ -158,8 +161,9 @@ class TestSyncServiceIntegration:
         assert result["error_code"] == "adapter_config_invalid"
         assert "macOS" in (result.get("error_message") or "")
 
-    def test_apple_reminder_through_service_also_config_error(self):
+    def test_apple_reminder_through_service_also_config_error(self, monkeypatch):
         """apple_reminder routes via apple_ prefix, same validate_config failure."""
+        monkeypatch.setattr(AppleSyncAdapter, "_is_macos", staticmethod(lambda: False))
         _insert_task("task_sc_002")
         service = _make_service(dry_run=True)
         result = service.run_task_sync("task_sc_002", "apple_reminder")

@@ -119,6 +119,7 @@ class TestPreflightDataTypes:
 class TestPreflightOnNonMacOS:
     """Preflight behavior when not running on macOS."""
 
+    @pytest.mark.skipif(sys.platform == "darwin", reason="Non-macOS platform test; on macOS apple_platform passes")
     def test_apple_platform_fails_on_non_macos(self):
         report = run_preflight()
         apple_platform = next(
@@ -128,6 +129,7 @@ class TestPreflightOnNonMacOS:
         assert apple_platform.status == PreflightStatus.FAIL
         assert "macOS" in apple_platform.detail
 
+    @pytest.mark.skipif(sys.platform == "darwin", reason="Non-macOS platform test; on macOS EventKit is available")
     def test_apple_checks_are_skipped_on_non_macos(self):
         report = run_preflight()
         skip_checks = [
@@ -314,6 +316,7 @@ class TestPreflightReadiness:
 class TestPreflightInternalCheckFunctions:
     """Internal check functions — no external calls made."""
 
+    @pytest.mark.skipif(sys.platform == "darwin", reason="Non-macOS test; on macOS EventKit imports successfully")
     def test_eventkit_deps_on_non_macos_returns_false(self):
         """On non-macOS, EventKit deps check must return False without error."""
         result = _check_eventkit_deps()
