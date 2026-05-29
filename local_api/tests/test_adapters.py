@@ -321,14 +321,46 @@ class TestAppleSyncAdapterRealMode:
         assert result.error_message is not None
         assert "macOS" in result.error_message
 
-    def test_real_mode_apple_reminder_also_platform_unsupported(self):
-        """Real mode with apple_reminder target also returns platform_unsupported."""
+    def test_real_mode_apple_reminder_is_disabled_on_macos(self, monkeypatch):
+        """Phase 18B forbids real Reminders writes even on macOS."""
+        monkeypatch.setattr(AppleSyncAdapter, "_is_macos", staticmethod(lambda: True))
         adapter = AppleSyncAdapter(target="apple_reminder")
+
         result = adapter.push(_SAMPLE_TASK, _SAMPLE_STATE_REMINDER)
-        if sys.platform == "darwin":
-            pytest.skip("platform_unsupported path only on non-macOS")
+
         assert result.success is False
-        assert result.error_code == "platform_unsupported"
+        assert result.sync_result == "failed"
+        assert result.error_code == "unsupported_target"
+        assert "Reminders" in result.error_message
+
+    def test_real_mode_calendar_delegates_to_push_real_on_macos(self, monkeypatch):
+        """Calendar real mode must no longer return not_implemented."""
+        monkeypatch.setattr(AppleSyncAdapter, "_is_macos", staticmethod(lambda: True))
+
+        def fake_push_real(self, task_data, sync_state):
+            return MockAppleAdapter().push(task_data, sync_state)
+
+        monkeypatch.setattr(AppleSyncAdapter, "_push_real", fake_push_real)
+        adapter = AppleSyncAdapter(target="apple_calendar")
+
+        result = adapter.push(_SAMPLE_TASK, _SAMPLE_STATE)
+
+        assert result.success is True
+        assert result.sync_result == "success"
+        assert result.error_code != "not_implemented"
+
+    def test_real_mode_calendar_missing_eventkit_is_structured_error(self, monkeypatch):
+        """Missing EventKit must be reported, not surfaced as an exception."""
+        monkeypatch.setattr(AppleSyncAdapter, "_is_macos", staticmethod(lambda: True))
+        adapter = AppleSyncAdapter(target="apple_calendar")
+
+        result = adapter.push(_SAMPLE_TASK, _SAMPLE_STATE)
+
+        if sys.platform == "darwin":
+            pytest.skip("EventKit may be installed on macOS acceptance machines")
+        assert result.success is False
+        assert result.sync_result == "failed"
+        assert result.error_code == "dependency_missing"
 
 
 # ═══════════════════════════════════════════════════════════════════════════

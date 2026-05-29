@@ -4,7 +4,7 @@ Tests cover:
   - Construction: check item fields, report structure
   - Preflight on non-macOS: fails apple_platform, skips Apple checks
   - Preflight with WeChat configured: passes wechat_config
-  - Preflight with partial WeChat config: fails with specific message
+  - Preflight with partial WeChat config: warns with specific message
   - Preflight output structure: all required fields present
   - Readiness computation: not_ready / partial / ready levels
   - Direct check functions: no external calls made
@@ -174,7 +174,7 @@ class TestPreflightOnNonMacOS:
     def test_readiness_not_ready_on_non_macos(self):
         report = run_preflight()
         assert report.readiness == ReadinessLevel.NOT_READY
-        assert "2 check(s) failed" in report.summary
+        assert "1 check(s) failed" in report.summary
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -192,8 +192,8 @@ class TestPreflightWeChatConfig:
             (c for c in report.checks if c.name == CHECK_WECHAT_CONFIG), None
         )
         assert check is not None
-        assert check.status == PreflightStatus.FAIL
-        assert "not set" in check.detail.lower()
+        assert check.status == PreflightStatus.SKIP
+        assert "outside Phase 18B" in check.detail
 
     def test_wechat_enabled_with_credentials_passes(self):
         with patch.dict(
@@ -223,7 +223,7 @@ class TestPreflightWeChatConfig:
             (c for c in report.checks if c.name == CHECK_WECHAT_CONFIG), None
         )
         assert check is not None
-        assert check.status == PreflightStatus.FAIL
+        assert check.status == PreflightStatus.WARN
         assert "both" in check.detail.lower()
 
     def test_wechat_enabled_missing_app_id(self):
@@ -240,7 +240,7 @@ class TestPreflightWeChatConfig:
             (c for c in report.checks if c.name == CHECK_WECHAT_CONFIG), None
         )
         assert check is not None
-        assert check.status == PreflightStatus.FAIL
+        assert check.status == PreflightStatus.WARN
         assert "WECHAT_APP_ID" in check.detail
 
     def test_wechat_enabled_missing_app_secret(self):
@@ -257,7 +257,7 @@ class TestPreflightWeChatConfig:
             (c for c in report.checks if c.name == CHECK_WECHAT_CONFIG), None
         )
         assert check is not None
-        assert check.status == PreflightStatus.FAIL
+        assert check.status == PreflightStatus.WARN
         assert "WECHAT_APP_SECRET" in check.detail
 
     def test_wechat_disabled_non_truthy(self):
@@ -271,8 +271,7 @@ class TestPreflightWeChatConfig:
             (c for c in report.checks if c.name == CHECK_WECHAT_CONFIG), None
         )
         assert check is not None
-        assert check.status == PreflightStatus.FAIL
-        assert "false" in check.detail
+        assert check.status == PreflightStatus.SKIP
 
 
 # ═══════════════════════════════════════════════════════════════════════════

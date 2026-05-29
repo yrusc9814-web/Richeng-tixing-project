@@ -182,29 +182,12 @@ def run_preflight() -> PreflightReport:
         )
 
     # ── 4. Apple: Reminders permission ────────────────────────────────
-    if is_macos:
-        rem_perm = _check_reminders_permission()
-        if rem_perm:
-            report.add(
-                CHECK_APPLE_REMINDER_PERM,
-                PreflightStatus.PASS,
-                detail="Reminders TCC permission appears granted.",
-                recommendation="Ready for Reminders write operations.",
-            )
-        else:
-            report.add(
-                CHECK_APPLE_REMINDER_PERM,
-                PreflightStatus.FAIL,
-                detail="Reminders TCC permission not detected.",
-                recommendation="Open System Settings → Privacy → Reminders and grant access.",
-            )
-    else:
-        report.add(
-            CHECK_APPLE_REMINDER_PERM,
-            PreflightStatus.SKIP,
-            detail="Not on macOS — Reminders permission is not applicable.",
-            recommendation="No action needed on this platform.",
-        )
+    report.add(
+        CHECK_APPLE_REMINDER_PERM,
+        PreflightStatus.SKIP,
+        detail="Reminders writes are intentionally disabled for Phase 18B.",
+        recommendation="No action needed for Calendar-only acceptance.",
+    )
 
     # ── 5. Apple: Dry-run mode ────────────────────────────────────────
     report.add(
@@ -238,39 +221,37 @@ def run_preflight() -> PreflightReport:
         elif not wechat_app_id and not wechat_app_secret:
             report.add(
                 CHECK_WECHAT_CONFIG,
-                PreflightStatus.FAIL,
+                PreflightStatus.WARN,
                 detail="WECHAT_REMINDER_ENABLED=true but both WECHAT_APP_ID and WECHAT_APP_SECRET are missing.",
-                recommendation="Set WECHAT_APP_ID and WECHAT_APP_SECRET environment variables.",
+                recommendation="Set WECHAT_APP_ID and WECHAT_APP_SECRET before WeChat notification acceptance.",
             )
         elif not wechat_app_id:
             report.add(
                 CHECK_WECHAT_CONFIG,
-                PreflightStatus.FAIL,
+                PreflightStatus.WARN,
                 detail="WECHAT_REMINDER_ENABLED=true but WECHAT_APP_ID is missing.",
-                recommendation="Set WECHAT_APP_ID environment variable.",
+                recommendation="Set WECHAT_APP_ID before WeChat notification acceptance.",
             )
         else:
             report.add(
                 CHECK_WECHAT_CONFIG,
-                PreflightStatus.FAIL,
+                PreflightStatus.WARN,
                 detail="WECHAT_REMINDER_ENABLED=true but WECHAT_APP_SECRET is missing.",
-                recommendation="Set WECHAT_APP_SECRET environment variable.",
+                recommendation="Set WECHAT_APP_SECRET before WeChat notification acceptance.",
             )
     elif wechat_enabled == "":
         report.add(
             CHECK_WECHAT_CONFIG,
-            PreflightStatus.FAIL,
-            detail="WECHAT_REMINDER_ENABLED is not set.",
-            recommendation="Set WECHAT_REMINDER_ENABLED=true to enable WeChat notifications, "
-                           "or use dry_run/test_mode for safe validation.",
+            PreflightStatus.SKIP,
+            detail="WECHAT_REMINDER_ENABLED is not set; WeChat is outside Phase 18B Calendar-only scope.",
+            recommendation="No action needed for Calendar-only acceptance.",
         )
     else:
         report.add(
             CHECK_WECHAT_CONFIG,
-            PreflightStatus.FAIL,
-            detail=f"WECHAT_REMINDER_ENABLED is '{wechat_enabled}' (not a truthy value).",
-            recommendation="Set WECHAT_REMINDER_ENABLED=true to enable, "
-                           "or use dry_run/test_mode for safe validation.",
+            PreflightStatus.SKIP,
+            detail=f"WECHAT_REMINDER_ENABLED is '{wechat_enabled}' (not a truthy value); WeChat is disabled.",
+            recommendation="No action needed for Calendar-only acceptance.",
         )
 
     # ── 8. WeChat: Dry-run mode ───────────────────────────────────────
@@ -354,19 +335,20 @@ def _check_eventkit_deps() -> bool:
 
 
 def _check_calendar_permission() -> bool:
-    """Check if Calendar TCC permission appears granted.
+    """Check if Calendar TCC permission is already granted.
 
-    This check performs NO real Calendar API calls. On macOS it attempts
-    a lightweight permission probe; on non-macOS it returns False.
-
-    Current implementation always returns False (real TCC check requires
-    macOS with EventKit framework and is deferred).
+    Uses EventKit's current access state only. It does not request access or
+    create Calendar data, so preflight remains a read-only readiness probe.
     """
     if sys.platform != "darwin":
         return False
-    # Deferred: real TCC check requires EKEventStore.requestAccess
-    # which is a real external call — not allowed in Phase 17.
-    return False
+    try:
+        import EventKit  # type: ignore[import-not-found]
+
+        store = EventKit.EKEventStore.alloc().init()
+        return bool(store.accessGrantedForEntityType_(EventKit.EKEntityTypeEvent))
+    except Exception:
+        return False
 
 
 def _check_reminders_permission() -> bool:
@@ -400,8 +382,7 @@ def _compute_readiness(report: PreflightReport) -> None:
 
     Rule:
         - All PASS or SKIP → READY
-        - Any FAIL (Apple) on macOS → NOT_READY
-        - Any FAIL (WeChat config) → PARTIAL (can use dry-run/test-mode)
+        - Any FAIL → NOT_READY
         - Any WARN → PARTIAL
     """
     fails = [c for c in report.checks if c.status == PreflightStatus.FAIL]
