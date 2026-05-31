@@ -68,14 +68,23 @@ def clean_db():
 
 
 def _insert_task(task_id: str, title: str = "Test integration task",
-                 status: str = "pending") -> None:
+                 status: str = "pending", *, eligible: bool = True) -> None:
     conn = get_db()
     now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
     conn.execute(
-        "INSERT INTO tasks (task_id, title, status, priority, "
-        "created_channel, created_at, updated_at) "
-        "VALUES (?, ?, ?, 'P2', 'api_test', ?, ?)",
-        (task_id, title, status, now, now),
+        "INSERT INTO tasks (task_id, title, status, priority, start_time, due_time, "
+        "sync_enabled, sync_targets, created_channel, created_at, updated_at) "
+        "VALUES (?, ?, ?, 'P2', ?, ?, ?, '[\"apple_calendar\"]', 'api_test', ?, ?)",
+        (
+            task_id,
+            title,
+            status,
+            "2026-06-01T10:00:00+08:00" if eligible else None,
+            "2026-06-01T10:30:00+08:00" if eligible else None,
+            1 if eligible else 0,
+            now,
+            now,
+        ),
     )
     conn.commit()
 
@@ -161,14 +170,14 @@ class TestSyncServiceIntegration:
         assert result["error_code"] == "adapter_config_invalid"
         assert "macOS" in (result.get("error_message") or "")
 
-    def test_apple_reminder_through_service_also_config_error(self, monkeypatch):
-        """apple_reminder routes via apple_ prefix, same validate_config failure."""
+    def test_apple_reminder_through_service_is_blocked(self, monkeypatch):
+        """apple_reminder is blocked by Phase 22 Calendar-only guardrails."""
         monkeypatch.setattr(AppleSyncAdapter, "_is_macos", staticmethod(lambda: False))
         _insert_task("task_sc_002")
         service = _make_service(dry_run=True)
         result = service.run_task_sync("task_sc_002", "apple_reminder")
         assert result["success"] is False
-        assert result["error_code"] == "adapter_config_invalid"
+        assert result["error_code"] == "unsupported_target"
 
     def test_mock_adapter_through_service_succeeds(self):
         """MockAppleAdapter (no platform check) works through SyncService."""
@@ -204,8 +213,8 @@ class TestSyncServiceIntegration:
         result = scheduler.sync_task_all_targets("task_sc_005")
         assert result["task_id"] == "task_sc_005"
         assert result["total"] == len(ALLOWED_SYNC_TARGETS)
-        assert result["success_count"] == len(ALLOWED_SYNC_TARGETS)
-        assert result["skip_count"] == 0
+        assert result["success_count"] == 1
+        assert result["skip_count"] == 1
 
     def test_sync_pending_with_mock_adapter(self):
         """sync_pending with MockAppleAdapter processes pending records."""
@@ -225,13 +234,13 @@ class TestSyncServiceIntegration:
 
         # First sync: succeeds
         first = scheduler.sync_task_all_targets("task_sc_007")
-        assert first["success_count"] == len(ALLOWED_SYNC_TARGETS)
+        assert first["success_count"] == 1
 
         # Second sync: skips all (already synced)
         second = scheduler.sync_task_all_targets("task_sc_007")
         assert second["skip_count"] >= 1
         for r in second["results"]:
-            if r["status"] == "skipped":
+            if r["target"] == "apple_calendar" and r["status"] == "skipped":
                 assert "Already" in (r.get("reason") or "")
 
     def test_skip_count_in_output(self):

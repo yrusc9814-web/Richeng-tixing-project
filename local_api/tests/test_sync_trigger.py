@@ -57,15 +57,24 @@ def clean_db():
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 
-def _insert_task(task_id: str) -> None:
+def _insert_task(task_id: str, *, eligible: bool = True) -> None:
     """Insert a minimal task row directly into the DB."""
     conn = get_db()
     now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
     conn.execute(
         """INSERT INTO tasks (
-            task_id, title, status, priority, created_channel, created_at, updated_at
-        ) VALUES (?, ?, 'pending', 'P2', 'api_test', ?, ?)""",
-        (task_id, f"Task {task_id}", now, now),
+            task_id, title, status, priority, start_time, due_time, sync_enabled,
+            sync_targets, created_channel, created_at, updated_at
+        ) VALUES (?, ?, 'pending', 'P2', ?, ?, ?, '["apple_calendar"]', 'api_test', ?, ?)""",
+        (
+            task_id,
+            f"Task {task_id}",
+            "2026-06-01T10:00:00+08:00" if eligible else None,
+            "2026-06-01T10:30:00+08:00" if eligible else None,
+            1 if eligible else 0,
+            now,
+            now,
+        ),
     )
     conn.commit()
 

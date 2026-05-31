@@ -54,22 +54,52 @@ def client():
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
-def _create_task(client: TestClient, title: str = "Phase 10 test") -> str:
-    """Create a task via the API and return its ID."""
-    resp = client.post("/api/tasks", json={"title": title}, headers=AUTH_HEADER)
+def _create_task(client: TestClient, title: str = "Phase 10 test", *, eligible: bool = True) -> str:
+    """Create a task via the API and optionally mark it eligible for manual sync."""
+    body = {"title": title}
+    if eligible:
+        body.update(
+            {
+                "start_time": "2026-06-01T10:00:00+08:00",
+                "due_time": "2026-06-01T10:30:00+08:00",
+            }
+        )
+    resp = client.post("/api/tasks", json=body, headers=AUTH_HEADER)
     assert resp.status_code == 201, f"Create task failed: {resp.text}"
-    return resp.json()["task_id"]
+    task_id = resp.json()["task_id"]
+    if eligible:
+        conn = get_db()
+        conn.execute(
+            """
+            UPDATE tasks
+               SET sync_enabled = 1,
+                   sync_targets = '["apple_calendar"]'
+             WHERE task_id = ?
+            """,
+            (task_id,),
+        )
+        conn.commit()
+    return task_id
 
 
-def _insert_task_direct(task_id: str) -> None:
+def _insert_task_direct(task_id: str, *, eligible: bool = True) -> None:
     """Insert a minimal task row directly into the DB."""
     conn = get_db()
     now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
     conn.execute(
         """INSERT INTO tasks (
-            task_id, title, status, priority, created_channel, created_at, updated_at
-        ) VALUES (?, ?, 'pending', 'P2', 'api_test', ?, ?)""",
-        (task_id, f"Task {task_id}", now, now),
+            task_id, title, status, priority, start_time, due_time, sync_enabled,
+            sync_targets, created_channel, created_at, updated_at
+        ) VALUES (?, ?, 'pending', 'P2', ?, ?, ?, '["apple_calendar"]', 'api_test', ?, ?)""",
+        (
+            task_id,
+            f"Task {task_id}",
+            "2026-06-01T10:00:00+08:00" if eligible else None,
+            "2026-06-01T10:30:00+08:00" if eligible else None,
+            1 if eligible else 0,
+            now,
+            now,
+        ),
     )
     conn.commit()
 

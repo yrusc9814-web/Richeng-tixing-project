@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     reminder_channels    TEXT    NOT NULL DEFAULT '["local_ui"]',
     created_channel      TEXT    NOT NULL DEFAULT 'api_test'
                          CHECK (created_channel IN ('local_ui', 'wechat', 'hermes', 'api_test')),
+    sync_targets         TEXT    NOT NULL DEFAULT '["apple_calendar"]',
     created_at           TEXT    NOT NULL,
     updated_at           TEXT    NOT NULL,
     sync_enabled         INTEGER NOT NULL DEFAULT 0,
@@ -88,6 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_logs_result ON sync_logs(sync_result);
 _SYNC_STATE_MIGRATIONS = [
     "ALTER TABLE sync_state ADD COLUMN started_at TEXT",
     "ALTER TABLE sync_state ADD COLUMN locked_at TEXT",
+    "ALTER TABLE tasks ADD COLUMN sync_targets TEXT NOT NULL DEFAULT '[\"apple_calendar\"]'",
 ]
 
 

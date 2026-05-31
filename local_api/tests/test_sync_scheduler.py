@@ -84,7 +84,13 @@ def multi_adapter_svc():
     return SyncService(adapters=[CalendarAdapter()])
 
 
-def _insert_task(task_id: str) -> None:
+def _insert_task(
+    task_id: str,
+    *,
+    sync_enabled: int = 1,
+    start_time: str | None = "2026-06-01T10:00:00+08:00",
+    due_time: str | None = "2026-06-01T10:30:00+08:00",
+) -> None:
     """Insert a minimal task row."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -93,10 +99,17 @@ def _insert_task(task_id: str) -> None:
     now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
     conn.execute(
         """INSERT INTO tasks (
-            task_id, title, status, priority, created_channel, created_at, updated_at
-        ) VALUES (?, ?, 'pending', 'P2', 'api_test', ?, ?)""",
-        (task_id, f"Task {task_id}", now, now),
+            task_id, title, status, priority, start_time, due_time,
+            created_channel, created_at, updated_at, sync_enabled
+        ) VALUES (?, ?, 'pending', 'P2', ?, ?, 'api_test', ?, ?, ?)""",
+        (task_id, f"Task {task_id}", start_time, due_time, now, now, sync_enabled),
     )
+    try:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN sync_targets TEXT NOT NULL DEFAULT '[\"apple_calendar\"]'"
+        )
+    except Exception:
+        pass
     conn.commit()
 
 
@@ -212,6 +225,21 @@ class TestSyncPending:
         # Verify the sync_state was updated
         updated = get_sync_state(sync["sync_id"])
         assert updated["sync_status"] == "synced"
+
+    def test_sync_pending_rechecks_eligibility_before_processing(self, scheduler):
+        _insert_task("task_sched_pend_no_time", start_time=None, due_time=None)
+        sync = create_sync_state(task_id="task_sched_pend_no_time", sync_target="apple_calendar")
+
+        result = scheduler.sync_pending(limit=10)
+
+        assert result["processed"] >= 1
+        blocked = [r for r in result["results"] if r["task_id"] == "task_sched_pend_no_time"]
+        assert blocked
+        assert blocked[0]["success"] is False
+        assert blocked[0]["status"] == "skipped"
+        assert blocked[0]["error"] == "Calendar sync eligibility failed: missing_time"
+        updated = get_sync_state(sync["sync_id"])
+        assert updated["sync_status"] == "skipped"
 
     def test_empty_pending_returns_zero(self, scheduler):
         """No pending records → nothing processed."""

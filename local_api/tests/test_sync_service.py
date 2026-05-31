@@ -15,7 +15,11 @@ from local_api import config
 from local_api.adapters import AdapterResult, SyncAdapter
 from local_api.database import get_db, init_db, reset_db
 from local_api.services.sync_service import SyncService
-from local_api.services.sync_state_service import get_sync_state, get_sync_state_by_key
+from local_api.services.sync_state_service import (
+    create_sync_state,
+    get_sync_state,
+    get_sync_state_by_key,
+)
 from local_api.services.sync_log_service import list_sync_logs
 
 
@@ -87,6 +91,17 @@ class MockPermanentFailAdapter(SyncAdapter):
         return None
 
 
+class CountingSuccessAdapter(MockSuccessAdapter):
+    """Success adapter that counts push calls."""
+
+    def __init__(self):
+        self.push_count = 0
+
+    def push(self, task_data: dict, sync_state: dict) -> AdapterResult:
+        self.push_count += 1
+        return super().push(task_data, sync_state)
+
+
 class MockAdapterConfigInvalid(SyncAdapter):
     """Adapter that fails config validation."""
 
@@ -115,7 +130,15 @@ def clean_db():
     reset_db()
 
 
-def _insert_task(task_id: str) -> None:
+def _insert_task(
+    task_id: str,
+    *,
+    sync_enabled: int = 0,
+    sync_targets: str = '["apple_calendar"]',
+    start_time: str | None = "2026-06-01T10:00:00+08:00",
+    due_time: str | None = "2026-06-01T10:30:00+08:00",
+    status: str = "pending",
+) -> None:
     """Insert a minimal task row."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -124,9 +147,20 @@ def _insert_task(task_id: str) -> None:
     now = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
     conn.execute(
         """INSERT INTO tasks (
-            task_id, title, status, priority, created_channel, created_at, updated_at
-        ) VALUES (?, ?, 'pending', 'P2', 'api_test', ?, ?)""",
-        (task_id, f"Task {task_id}", now, now),
+            task_id, title, status, priority, start_time, due_time,
+            created_channel, created_at, updated_at, sync_enabled
+        ) VALUES (?, ?, ?, 'P2', ?, ?, 'api_test', ?, ?, ?)""",
+        (task_id, f"Task {task_id}", status, start_time, due_time, now, now, sync_enabled),
+    )
+    try:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN sync_targets TEXT NOT NULL DEFAULT '[\"apple_calendar\"]'"
+        )
+    except Exception:
+        pass
+    conn.execute(
+        "UPDATE tasks SET sync_targets = ? WHERE task_id = ?",
+        (sync_targets, task_id),
     )
     conn.commit()
 
@@ -171,7 +205,7 @@ class TestRunTaskSyncSuccess:
     """SyncService fully succeeds with a working adapter."""
 
     def test_routes_and_records_success(self):
-        _insert_task("task_svc_001")
+        _insert_task("task_svc_001", sync_enabled=1)
         svc = SyncService(adapters=[MockSuccessAdapter()])
 
         result = svc.run_task_sync("task_svc_001", "apple_calendar")
@@ -182,7 +216,7 @@ class TestRunTaskSyncSuccess:
         assert result["sync_id"] is not None
 
     def test_creates_sync_state_and_persists(self):
-        _insert_task("task_svc_002")
+        _insert_task("task_svc_002", sync_enabled=1)
         svc = SyncService(adapters=[MockSuccessAdapter()])
 
         result = svc.run_task_sync("task_svc_002", "apple_calendar")
@@ -194,7 +228,7 @@ class TestRunTaskSyncSuccess:
         assert record["external_id"] == "ext_abc123"
 
     def test_writes_sync_log_on_success(self):
-        _insert_task("task_svc_003")
+        _insert_task("task_svc_003", sync_enabled=1)
         svc = SyncService(adapters=[MockSuccessAdapter()])
 
         result = svc.run_task_sync("task_svc_003", "apple_calendar")
@@ -204,18 +238,111 @@ class TestRunTaskSyncSuccess:
         assert logs[0]["sync_result"] == "success"
         assert logs[0]["triggered_by"] == "sync_service"
 
-    def test_reuses_existing_sync_state(self):
-        _insert_task("task_svc_004")
-        svc = SyncService(adapters=[MockSuccessAdapter()])
+    def test_reuses_existing_sync_state_without_duplicate_create_when_already_synced(self):
+        _insert_task("task_svc_004", sync_enabled=1)
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
 
-        # First call creates sync_state
         r1 = svc.run_task_sync("task_svc_004", "apple_calendar")
-        # Second call reuses it
         r2 = svc.run_task_sync("task_svc_004", "apple_calendar")
 
         assert r1["sync_id"] == r2["sync_id"]
+        assert r2["success"] is True
+        assert r2["sync_status"] == "skipped"
+        assert r2["error_code"] == "already_synced"
+        assert adapter.push_count == 1
         logs = _logs(r1["sync_id"])
-        assert len(logs) == 2  # one per call
+        assert len(logs) == 1
+
+
+class TestRunTaskSyncGuardrails:
+    """Phase 22 Calendar sync eligibility guardrails."""
+
+    def test_blocks_no_time_task_without_creating_sync_state(self):
+        _insert_task("task_guard_no_time", sync_enabled=1, start_time=None, due_time=None)
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_guard_no_time", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "skipped"
+        assert result["error_code"] == "missing_time"
+        assert adapter.push_count == 0
+        assert get_sync_state_by_key("task_guard_no_time", "apple_calendar") is None
+
+    def test_blocks_sync_disabled_without_creating_sync_state(self):
+        _insert_task("task_guard_disabled", sync_enabled=0)
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_guard_disabled", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "skipped"
+        assert result["error_code"] == "sync_disabled"
+        assert adapter.push_count == 0
+        assert get_sync_state_by_key("task_guard_disabled", "apple_calendar") is None
+
+    def test_blocks_due_time_not_after_start_time(self):
+        _insert_task(
+            "task_guard_bad_window",
+            sync_enabled=1,
+            start_time="2026-06-01T10:30:00+08:00",
+            due_time="2026-06-01T10:00:00+08:00",
+        )
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_guard_bad_window", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "skipped"
+        assert result["error_code"] == "invalid_time_window"
+        assert adapter.push_count == 0
+        assert get_sync_state_by_key("task_guard_bad_window", "apple_calendar") is None
+
+    def test_blocks_non_pending_task_status(self):
+        _insert_task("task_guard_completed", sync_enabled=1, status="completed")
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_guard_completed", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "skipped"
+        assert result["error_code"] == "invalid_task_status"
+        assert adapter.push_count == 0
+        assert get_sync_state_by_key("task_guard_completed", "apple_calendar") is None
+
+    def test_blocks_when_sync_targets_do_not_include_calendar(self):
+        _insert_task("task_guard_target_disabled", sync_enabled=1, sync_targets='["apple_reminder"]')
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_guard_target_disabled", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "skipped"
+        assert result["error_code"] == "target_not_enabled"
+        assert adapter.push_count == 0
+        assert get_sync_state_by_key("task_guard_target_disabled", "apple_calendar") is None
+
+    def test_existing_pending_sync_state_is_not_processed_when_no_time(self):
+        _insert_task("task_guard_existing_pending_no_time", sync_enabled=1, start_time=None, due_time=None)
+        sync = create_sync_state("task_guard_existing_pending_no_time", "apple_calendar")
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_guard_existing_pending_no_time", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "skipped"
+        assert result["sync_id"] == sync["sync_id"]
+        assert result["error_code"] == "missing_time"
+        assert adapter.push_count == 0
+        state = get_sync_state(sync["sync_id"])
+        assert state["sync_status"] == "skipped"
 
 
 # ── Tests: run_task_sync — error paths ────────────────────────────────
@@ -246,7 +373,7 @@ class TestRunTaskSyncError:
         assert result["error_code"] == "adapter_not_found"
 
     def test_retryable_failure_returns_failed_status(self):
-        _insert_task("task_svc_retry")
+        _insert_task("task_svc_retry", sync_enabled=1)
         svc = SyncService(adapters=[MockFailAdapter()])
 
         result = svc.run_task_sync("task_svc_retry", "apple_calendar")
@@ -257,7 +384,7 @@ class TestRunTaskSyncError:
         assert result["error_code"] == "network"
 
     def test_retryable_failure_writes_log(self):
-        _insert_task("task_svc_retry_log")
+        _insert_task("task_svc_retry_log", sync_enabled=1)
         svc = SyncService(adapters=[MockFailAdapter()])
 
         result = svc.run_task_sync("task_svc_retry_log", "apple_calendar")
@@ -268,7 +395,7 @@ class TestRunTaskSyncError:
         assert logs[0]["error_code"] == "network"
 
     def test_permanent_failure_returns_failed_permanent(self):
-        _insert_task("task_svc_perm")
+        _insert_task("task_svc_perm", sync_enabled=1)
         svc = SyncService(adapters=[MockPermanentFailAdapter()])
 
         result = svc.run_task_sync("task_svc_perm", "apple_calendar")
@@ -278,7 +405,7 @@ class TestRunTaskSyncError:
         assert result["error_code"] == "auth_failed"
 
     def test_permanent_failure_writes_log(self):
-        _insert_task("task_svc_perm_log")
+        _insert_task("task_svc_perm_log", sync_enabled=1)
         svc = SyncService(adapters=[MockPermanentFailAdapter()])
 
         result = svc.run_task_sync("task_svc_perm_log", "apple_calendar")
@@ -289,7 +416,7 @@ class TestRunTaskSyncError:
         assert logs[0]["error_code"] == "auth_failed"
 
     def test_config_invalid_returns_error_before_push(self):
-        _insert_task("task_svc_config")
+        _insert_task("task_svc_config", sync_enabled=1)
         svc = SyncService(adapters=[MockAdapterConfigInvalid()])
 
         result = svc.run_task_sync("task_svc_config", "apple_calendar")
@@ -301,7 +428,7 @@ class TestRunTaskSyncError:
     def test_task_not_found_error(self):
         """Sync where task was deleted after sync_state creation."""
         # Create task + sync_state, then delete the task
-        _insert_task("task_svc_orphan")
+        _insert_task("task_svc_orphan", sync_enabled=1)
         svc = SyncService(adapters=[MockSuccessAdapter()])
         first_result = svc.run_task_sync("task_svc_orphan", "apple_calendar")
         assert first_result["success"] is True
@@ -323,7 +450,7 @@ class TestRunTaskSyncError:
 
     def test_adapter_exception_is_caught(self):
         """Adapter that raises during push is caught and logged."""
-        _insert_task("task_svc_exc")
+        _insert_task("task_svc_exc", sync_enabled=1)
 
         class CrashingAdapter(SyncAdapter):
             @property

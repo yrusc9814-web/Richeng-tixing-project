@@ -17,6 +17,7 @@ from ..adapters import AdapterResult, SyncAdapter
 from ..config import ALLOWED_SYNC_TARGETS
 from ..database import get_db
 from .sync_log_service import create_sync_log
+from .sync_eligibility import eligible_for_calendar_sync
 from .sync_state_service import (
     create_sync_state,
     get_sync_state_by_key,
@@ -84,6 +85,14 @@ class SyncService:
                 message=f"Invalid sync_target: {sync_target}",
             )
 
+        if sync_target != "apple_calendar":
+            return _error_result(
+                sync_id=None,
+                status="skipped",
+                code="unsupported_target",
+                message="Only apple_calendar sync is allowed",
+            )
+
         # 1. Route to adapter
         adapter = self._route_adapter(sync_target)
         if adapter is None:
@@ -104,26 +113,28 @@ class SyncService:
                 message=err_msg or "Adapter config validation failed",
             )
 
-        # 3. Create or find existing sync_state
+        # 3. Look up existing sync_state before fetching task data. This keeps
+        # task-not-found errors tied to the existing record when a task was
+        # deleted after state creation, while still avoiding new state creation
+        # for never-seen tasks.
         try:
             existing = get_sync_state_by_key(task_id, sync_target)
             if existing:
                 sync_state = existing
                 sync_id = sync_state["sync_id"]
             else:
-                sync_state = create_sync_state(
-                    task_id=task_id, sync_target=sync_target
-                )
-                sync_id = sync_state["sync_id"]
+                sync_state = None
+                sync_id = None
         except ValueError as e:
             return _error_result(
                 sync_id=None,
                 status="failed_permanent",
-                code="state_create_failed",
+                code="state_lookup_failed",
                 message=str(e),
             )
 
-        # 4. Fetch task data
+        # 4. Fetch task data before creating sync_state; eligibility failures
+        # must not enqueue new records.
         conn = get_db()
         task_row = conn.execute(
             "SELECT * FROM tasks WHERE task_id = ?",
@@ -138,10 +149,54 @@ class SyncService:
             )
         task_data = dict(task_row)
 
-        # 5. Transition to in_progress
+        # 5. Duplicate create guard: already synced records with an external_id
+        # are idempotently skipped instead of creating a second Calendar event.
+        if (
+            sync_state is not None
+            and sync_state.get("sync_status") == "synced"
+            and sync_state.get("external_id")
+        ):
+            return {
+                "success": True,
+                "sync_id": sync_id,
+                "sync_status": "skipped",
+                "external_id": sync_state.get("external_id"),
+                "error_code": "already_synced",
+                "error_message": "Task is already synced to Apple Calendar",
+            }
+
+        # 6. Phase 22 eligibility guardrails run before new sync_state creation
+        # and before processing existing pending/failed records.
+        eligibility = eligible_for_calendar_sync(task_data, sync_target)
+        if not eligibility.allowed:
+            if sync_id is not None:
+                _safe_transition(sync_id, "skipped", trigger="manual")
+            return _error_result(
+                sync_id=sync_id,
+                status="skipped",
+                code=eligibility.reason,
+                message=f"Calendar sync eligibility failed: {eligibility.reason}",
+                external_id=sync_state.get("external_id") if sync_state else None,
+            )
+
+        if sync_state is None:
+            try:
+                sync_state = create_sync_state(
+                    task_id=task_id, sync_target=sync_target
+                )
+                sync_id = sync_state["sync_id"]
+            except ValueError as e:
+                return _error_result(
+                    sync_id=None,
+                    status="failed_permanent",
+                    code="state_create_failed",
+                    message=str(e),
+                )
+
+        # 7. Transition to in_progress
         _safe_transition(sync_id, "in_progress", trigger="engine")
 
-        # 6. Execute push
+        # 8. Execute push
         try:
             push_result: AdapterResult = adapter.push(task_data, sync_state)
         except Exception as exc:

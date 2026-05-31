@@ -24,7 +24,7 @@ os.environ["HERMES_API_TOKEN"] = "test-token-hermes-local-4.3"
 # Now import app — it will pick up the test DB
 # Now import app — it will pick up the test DB
 from local_api.main import app
-from local_api.database import reset_db, init_db
+from local_api.database import reset_db, init_db, get_db
 from local_api.services.sync_service import SyncService
 
 TEST_TOKEN = "test-token-hermes-local-4.3"
@@ -58,11 +58,32 @@ client = TestClient(app)
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _create_task(title: str = "Sync route test task") -> str:
-    """Create a task via the API and return its ID."""
-    resp = client.post("/api/tasks", json={"title": title}, headers=AUTH_HEADER)
+def _create_task(title: str = "Sync route test task", *, eligible: bool = True) -> str:
+    """Create a task via the API and optionally mark it eligible for manual sync."""
+    body = {"title": title}
+    if eligible:
+        body.update(
+            {
+                "start_time": "2026-06-01T10:00:00+08:00",
+                "due_time": "2026-06-01T10:30:00+08:00",
+            }
+        )
+    resp = client.post("/api/tasks", json=body, headers=AUTH_HEADER)
     assert resp.status_code == 201, f"Task creation failed: {resp.text}"
-    return resp.json()["task_id"]
+    task_id = resp.json()["task_id"]
+    if eligible:
+        conn = get_db()
+        conn.execute(
+            """
+            UPDATE tasks
+               SET sync_enabled = 1,
+                   sync_targets = '["apple_calendar"]'
+             WHERE task_id = ?
+            """,
+            (task_id,),
+        )
+        conn.commit()
+    return task_id
 
 
 # ── Tests: POST .../push ──────────────────────────────────────────────
@@ -89,7 +110,7 @@ class TestPushEndpoint:
         assert data["sync_id"] is not None
         assert data["error"] is None
 
-    def test_push_with_explicit_apple_reminder(self):
+    def test_push_with_explicit_apple_reminder_is_blocked(self):
         task_id = _create_task()
         resp = client.post(
             f"/api/sync/tasks/{task_id}/push",
@@ -98,9 +119,10 @@ class TestPushEndpoint:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["ok"] is True
+        assert data["ok"] is False
         assert data["target"] == "apple_reminder"
-        assert data["status"] == "synced"
+        assert data["status"] == "skipped"
+        assert "Only apple_calendar sync is allowed" in (data["error"] or "")
 
     def test_push_invalid_target(self):
         task_id = _create_task()
