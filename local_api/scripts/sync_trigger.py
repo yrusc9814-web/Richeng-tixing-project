@@ -89,11 +89,11 @@ def build_services(dry_run: bool = False, explicit_target: Optional[str] = None)
     """Build SyncService and SyncScheduler for CLI use.
 
     Args:
-        dry_run: If True, use a single DryRunAdapter.
-                  If False, use one DryRunAdapter per ALLOWED_SYNC_TARGETS
-                  (safe default — no real adapters are wired yet).
-        explicit_target: If provided, only create adapter for this target
-                         (currently still DryRunAdapter).
+        dry_run: If True, use a single DryRunAdapter (no external side effects).
+                 If False, wire real adapters for supported targets.
+        explicit_target: If provided, create adapter only for this target.
+                         apple_calendar → AppleSyncAdapter (real Calendar write)
+                         Other targets → DryRunAdapter (safe stub)
 
     Returns:
         (sync_service, sync_scheduler) tuple ready for use.
@@ -101,7 +101,7 @@ def build_services(dry_run: bool = False, explicit_target: Optional[str] = None)
     if dry_run:
         adapters = [DryRunAdapter()]
     elif explicit_target:
-        adapters = [DryRunAdapter(target=explicit_target)]
+        adapters = [_build_target_adapter(explicit_target)]
     else:
         adapters = _default_adapters()
     service = SyncService(adapters=adapters)
@@ -109,9 +109,30 @@ def build_services(dry_run: bool = False, explicit_target: Optional[str] = None)
     return service, scheduler
 
 
+def _build_target_adapter(target: str) -> SyncAdapter:
+    """Return the correct adapter for a given target.
+
+    apple_calendar → AppleSyncAdapter (real EventKit write)
+    apple_reminder → DryRunAdapter (Reminders are disabled in Phase 18B)
+    other          → DryRunAdapter (safe stub)
+    """
+    if target == "apple_calendar":
+        from local_api.adapters.apple_adapter import AppleSyncAdapter
+
+        return AppleSyncAdapter(target="apple_calendar")
+    return DryRunAdapter(target=target)
+
+
 def _default_adapters():
-    """Return configured adapters (safe default: all DryRunAdapter)."""
-    return [DryRunAdapter(target=t) for t in ALLOWED_SYNC_TARGETS]
+    """Return configured adapters for all allowed sync targets.
+
+    apple_calendar → AppleSyncAdapter (real Calendar write via EventKit)
+    apple_reminder → DryRunAdapter (Reminders writes are disabled)
+    """
+    result = []
+    for t in ALLOWED_SYNC_TARGETS:
+        result.append(_build_target_adapter(t))
+    return result
 
 
 # ── Output helpers ───────────────────────────────────────────────────────
