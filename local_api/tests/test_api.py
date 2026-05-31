@@ -367,6 +367,44 @@ class TestGetTask:
 class TestUpdateTask:
     """PATCH /api/tasks/{task_id}"""
 
+    def _create_calendar_task(self, title="Calendar task"):
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "title": title,
+                "description": "Original description",
+                "priority": "P1",
+                "start_time": "2026-06-01T09:00:00+08:00",
+                "due_time": "2026-06-01T10:00:00+08:00",
+                "timezone": "Asia/Shanghai",
+                "location": "Office",
+                "sync_enabled": True,
+                "sync_targets": ["apple_calendar"],
+            },
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 201
+        return resp.json()["task_id"]
+
+    def _mark_calendar_synced(self, task_id, external_id="calendar-event-001"):
+        sync = get_db().execute(
+            "SELECT * FROM sync_state WHERE task_id = ? AND sync_target = 'apple_calendar'",
+            (task_id,),
+        ).fetchone()
+        assert sync is not None
+        get_db().execute(
+            "UPDATE sync_state SET sync_status = 'synced', external_id = ? WHERE sync_id = ?",
+            (external_id, sync["sync_id"]),
+        )
+        get_db().commit()
+        return sync["sync_id"]
+
+    def _calendar_sync_rows(self, task_id):
+        return get_db().execute(
+            "SELECT * FROM sync_state WHERE task_id = ? AND sync_target = 'apple_calendar' ORDER BY sync_id",
+            (task_id,),
+        ).fetchall()
+
     def test_update_title(self):
         create = client.post(
             "/api/tasks", json={"title": "Old title"}, headers=AUTH_HEADER
@@ -413,6 +451,148 @@ class TestUpdateTask:
             headers=AUTH_HEADER,
         )
         assert resp.status_code == 422
+
+    def test_synced_calendar_task_title_change_marks_sync_state_stale(self):
+        task_id = self._create_calendar_task()
+        sync_id = self._mark_calendar_synced(task_id, external_id="calendar-event-title")
+
+        resp = client.patch(
+            f"/api/tasks/{task_id}",
+            json={"title": "Updated calendar title"},
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        rows = self._calendar_sync_rows(task_id)
+        assert len(rows) == 1
+        assert rows[0]["sync_id"] == sync_id
+        assert rows[0]["sync_status"] == "stale"
+        assert rows[0]["external_id"] == "calendar-event-title"
+
+    def test_synced_calendar_task_time_change_marks_sync_state_stale(self):
+        task_id = self._create_calendar_task()
+        self._mark_calendar_synced(task_id, external_id="calendar-event-time")
+
+        resp = client.patch(
+            f"/api/tasks/{task_id}",
+            json={"due_time": "2026-06-01T11:00:00+08:00"},
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        rows = self._calendar_sync_rows(task_id)
+        assert len(rows) == 1
+        assert rows[0]["sync_status"] == "stale"
+        assert rows[0]["external_id"] == "calendar-event-time"
+
+    def test_synced_calendar_task_non_sync_field_change_does_not_mark_stale(self):
+        task_id = self._create_calendar_task()
+        self._mark_calendar_synced(task_id, external_id="calendar-event-weather")
+
+        resp = client.patch(
+            f"/api/tasks/{task_id}",
+            json={"need_weather_check": True},
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        rows = self._calendar_sync_rows(task_id)
+        assert len(rows) == 1
+        assert rows[0]["sync_status"] == "synced"
+        assert rows[0]["external_id"] == "calendar-event-weather"
+
+    def test_update_synced_calendar_task_does_not_create_second_sync_state(self):
+        task_id = self._create_calendar_task()
+        self._mark_calendar_synced(task_id)
+
+        resp = client.patch(
+            f"/api/tasks/{task_id}",
+            json={"location": "Updated office"},
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        assert len(self._calendar_sync_rows(task_id)) == 1
+
+    def test_update_calendar_task_does_not_write_calendar_or_run_sync(self):
+        task_id = self._create_calendar_task()
+        self._mark_calendar_synced(task_id, external_id="calendar-event-no-write")
+
+        resp = client.patch(
+            f"/api/tasks/{task_id}",
+            json={"title": "No direct Calendar write"},
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        row = self._calendar_sync_rows(task_id)[0]
+        assert row["sync_status"] == "stale"
+        assert row["external_id"] == "calendar-event-no-write"
+        log_count = get_db().execute(
+            "SELECT COUNT(*) AS cnt FROM sync_logs WHERE local_task_id = ?",
+            (task_id,),
+        ).fetchone()["cnt"]
+        assert log_count == 0
+
+    def test_update_unsynced_eligible_task_keeps_pending_sync_state(self):
+        task_id = self._create_calendar_task()
+
+        resp = client.patch(
+            f"/api/tasks/{task_id}",
+            json={"title": "Still pending"},
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        rows = self._calendar_sync_rows(task_id)
+        assert len(rows) == 1
+        assert rows[0]["sync_status"] == "pending"
+        assert rows[0]["external_id"] is None
+
+    def test_update_unsynced_eligible_task_without_sync_state_creates_pending(self):
+        task_id = client.post(
+            "/api/tasks",
+            json={"title": "Initially no time", "sync_enabled": True, "sync_targets": ["apple_calendar"]},
+            headers=AUTH_HEADER,
+        ).json()["task_id"]
+
+        resp = client.patch(
+            f"/api/tasks/{task_id}",
+            json={
+                "start_time": "2026-06-01T09:00:00+08:00",
+                "due_time": "2026-06-01T10:00:00+08:00",
+            },
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        rows = self._calendar_sync_rows(task_id)
+        assert len(rows) == 1
+        assert rows[0]["sync_status"] == "pending"
+
+    def test_update_ineligible_task_is_blocked_from_sync_state(self):
+        task_id = client.post(
+            "/api/tasks",
+            json={
+                "title": "Calendar task that becomes invalid",
+                "sync_enabled": True,
+                "sync_targets": ["apple_calendar"],
+                "start_time": "2026-06-01T09:00:00+08:00",
+                "due_time": "2026-06-01T10:00:00+08:00",
+            },
+            headers=AUTH_HEADER,
+        ).json()["task_id"]
+
+        resp = client.patch(
+            f"/api/tasks/{task_id}",
+            json={"due_time": "2026-06-01T09:00:00+08:00"},
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        rows = self._calendar_sync_rows(task_id)
+        assert len(rows) == 1
+        assert rows[0]["sync_status"] == "pending"
 
 
 class TestCompleteTask:

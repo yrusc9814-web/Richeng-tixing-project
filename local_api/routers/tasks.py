@@ -15,7 +15,7 @@ from ..database import get_db
 from ..models import TaskCreateRequest, TaskUpdateRequest, TaskResponse, TaskListResponse
 from ..config import MAX_LIMIT, DEFAULT_LIMIT, ALLOWED_PRIORITIES, ALLOWED_STATUSES
 from ..services.sync_eligibility import eligible_for_calendar_sync
-from ..services.sync_state_service import create_sync_state
+from ..services.sync_state_service import create_sync_state, get_sync_state_by_key, update_sync_state
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 logger = logging.getLogger("local_api.tasks")
@@ -51,9 +51,26 @@ def _task_to_eligibility_dict(row) -> dict:
     return dict(row)
 
 
-def _enqueue_calendar_sync_state_if_eligible(task: dict) -> None:
-    """Create one pending apple_calendar sync_state for eligible new tasks only."""
-    result = eligible_for_calendar_sync(task, "apple_calendar")
+_CALENDAR_SYNC_TARGET = "apple_calendar"
+_SYNC_RELEVANT_TASK_FIELDS = {
+    "title",
+    "description",
+    "start_time",
+    "due_time",
+    "timezone",
+    "location",
+    "priority",
+}
+
+
+def _sync_relevant_fields_changed(before: dict, after: dict) -> bool:
+    """Return whether fields mirrored to Calendar changed."""
+    return any(before.get(field) != after.get(field) for field in _SYNC_RELEVANT_TASK_FIELDS)
+
+
+def _ensure_pending_calendar_sync_state_if_eligible(task: dict) -> None:
+    """Create a pending apple_calendar sync_state only when eligible and missing."""
+    result = eligible_for_calendar_sync(task, _CALENDAR_SYNC_TARGET)
     if not result.allowed:
         logger.info(
             "calendar_sync_state_not_enqueued task_id=%s reason=%s",
@@ -62,10 +79,14 @@ def _enqueue_calendar_sync_state_if_eligible(task: dict) -> None:
         )
         return
 
+    existing = get_sync_state_by_key(task["task_id"], _CALENDAR_SYNC_TARGET)
+    if existing is not None:
+        return
+
     try:
         create_sync_state(
             task_id=task["task_id"],
-            sync_target="apple_calendar",
+            sync_target=_CALENDAR_SYNC_TARGET,
             sync_status="pending",
         )
     except ValueError as exc:
@@ -75,6 +96,22 @@ def _enqueue_calendar_sync_state_if_eligible(task: dict) -> None:
             str(exc),
         )
         raise
+
+
+def _sync_calendar_state_after_task_update(before: dict, after: dict) -> None:
+    """Maintain apple_calendar sync_state after task updates without writing Calendar."""
+    existing = get_sync_state_by_key(after["task_id"], _CALENDAR_SYNC_TARGET)
+    if (
+        existing is not None
+        and existing.get("sync_status") == "synced"
+        and existing.get("external_id")
+        and _sync_relevant_fields_changed(before, after)
+    ):
+        update_sync_state(existing["sync_id"], sync_status="stale")
+        return
+
+    if existing is None or existing.get("sync_status") != "synced":
+        _ensure_pending_calendar_sync_state_if_eligible(after)
 
 
 # ── POST /api/tasks ────────────────────────────────────────────────────────
@@ -121,7 +158,7 @@ def create_task(request: Request, body: TaskCreateRequest):
     conn.commit()
 
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
-    _enqueue_calendar_sync_state_if_eligible(_task_to_eligibility_dict(row))
+    _ensure_pending_calendar_sync_state_if_eligible(_task_to_eligibility_dict(row))
     logger.info("task_created task_id=%s title=REDACTED request_id=%s", task_id, getattr(request.state, "request_id", "?"))
     return _row_to_response(row)
 
@@ -231,6 +268,7 @@ def update_task(request: Request, task_id: str, body: TaskUpdateRequest):
     params.append(now)
     params.append(task_id)
 
+    before_update = _task_to_eligibility_dict(row)
     conn.execute(
         f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = ?",
         params,
@@ -238,6 +276,7 @@ def update_task(request: Request, task_id: str, body: TaskUpdateRequest):
     conn.commit()
 
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+    _sync_calendar_state_after_task_update(before_update, _task_to_eligibility_dict(row))
     logger.info("task_updated task_id=%s request_id=%s", task_id, getattr(request.state, "request_id", "?"))
     return _row_to_response(row)
 
