@@ -27,6 +27,8 @@ class TaskCreateRequest(BaseModel):
     need_weather_check: bool = Field(default=False)
     reminder_channels: list[str] = Field(default=["local_ui"])
     created_channel: str = Field(default="api_test")
+    sync_enabled: bool = Field(default=False)
+    sync_targets: list[str] = Field(default=["apple_calendar"])
 
     @field_validator("priority")
     @classmethod

@@ -143,6 +143,140 @@ class TestCreateTask:
         )
         assert resp.status_code == 422
 
+    def test_create_eligible_task_enqueues_pending_calendar_sync_state(self):
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "title": "Calendar task",
+                "start_time": "2026-06-01T09:00:00+08:00",
+                "due_time": "2026-06-01T10:00:00+08:00",
+                "sync_enabled": True,
+                "sync_targets": ["apple_calendar"],
+            },
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 201
+        task_id = resp.json()["task_id"]
+        row = get_db().execute(
+            "SELECT * FROM sync_state WHERE task_id = ? AND sync_target = 'apple_calendar'",
+            (task_id,),
+        ).fetchone()
+        assert row is not None
+        assert row["sync_status"] == "pending"
+        assert row["sync_key"] == f"{task_id}:apple_calendar"
+        assert row["external_id"] is None
+
+    def test_create_task_without_time_does_not_enqueue_sync_state(self):
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "title": "No time",
+                "sync_enabled": True,
+                "sync_targets": ["apple_calendar"],
+            },
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 201
+        task_id = resp.json()["task_id"]
+        count = get_db().execute(
+            "SELECT COUNT(*) AS cnt FROM sync_state WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()["cnt"]
+        assert count == 0
+
+    def test_create_task_with_sync_enabled_false_does_not_enqueue_sync_state(self):
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "title": "Disabled sync",
+                "start_time": "2026-06-01T09:00:00+08:00",
+                "due_time": "2026-06-01T10:00:00+08:00",
+                "sync_enabled": False,
+                "sync_targets": ["apple_calendar"],
+            },
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 201
+        task_id = resp.json()["task_id"]
+        count = get_db().execute(
+            "SELECT COUNT(*) AS cnt FROM sync_state WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()["cnt"]
+        assert count == 0
+
+    def test_create_task_with_non_calendar_target_does_not_enqueue_sync_state(self):
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "title": "Reminder target",
+                "start_time": "2026-06-01T09:00:00+08:00",
+                "due_time": "2026-06-01T10:00:00+08:00",
+                "sync_enabled": True,
+                "sync_targets": ["apple_reminder"],
+            },
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 201
+        task_id = resp.json()["task_id"]
+        count = get_db().execute(
+            "SELECT COUNT(*) AS cnt FROM sync_state WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()["cnt"]
+        assert count == 0
+
+    def test_create_task_with_due_time_not_after_start_time_does_not_enqueue_sync_state(self):
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "title": "Invalid time window",
+                "start_time": "2026-06-01T10:00:00+08:00",
+                "due_time": "2026-06-01T10:00:00+08:00",
+                "sync_enabled": True,
+                "sync_targets": ["apple_calendar"],
+            },
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 201
+        task_id = resp.json()["task_id"]
+        count = get_db().execute(
+            "SELECT COUNT(*) AS cnt FROM sync_state WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()["cnt"]
+        assert count == 0
+
+    def test_create_task_does_not_write_calendar_or_run_sync(self):
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "title": "Do not sync immediately",
+                "start_time": "2026-06-01T09:00:00+08:00",
+                "due_time": "2026-06-01T10:00:00+08:00",
+                "sync_enabled": True,
+                "sync_targets": ["apple_calendar"],
+            },
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 201
+        task_id = resp.json()["task_id"]
+        sync_row = get_db().execute(
+            "SELECT * FROM sync_state WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        assert sync_row is not None
+        assert sync_row["sync_status"] == "pending"
+        assert sync_row["external_id"] is None
+        log_count = get_db().execute(
+            "SELECT COUNT(*) AS cnt FROM sync_logs WHERE local_task_id = ?",
+            (task_id,),
+        ).fetchone()["cnt"]
+        assert log_count == 0
+
 
 class TestListTasks:
     """GET /api/tasks"""

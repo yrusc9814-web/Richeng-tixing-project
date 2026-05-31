@@ -14,6 +14,8 @@ from pydantic import ValidationError
 from ..database import get_db
 from ..models import TaskCreateRequest, TaskUpdateRequest, TaskResponse, TaskListResponse
 from ..config import MAX_LIMIT, DEFAULT_LIMIT, ALLOWED_PRIORITIES, ALLOWED_STATUSES
+from ..services.sync_eligibility import eligible_for_calendar_sync
+from ..services.sync_state_service import create_sync_state
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 logger = logging.getLogger("local_api.tasks")
@@ -44,6 +46,37 @@ def _row_to_response(row) -> TaskResponse:
     return TaskResponse(**d)
 
 
+def _task_to_eligibility_dict(row) -> dict:
+    """Return a raw task dict suitable for Calendar sync eligibility checks."""
+    return dict(row)
+
+
+def _enqueue_calendar_sync_state_if_eligible(task: dict) -> None:
+    """Create one pending apple_calendar sync_state for eligible new tasks only."""
+    result = eligible_for_calendar_sync(task, "apple_calendar")
+    if not result.allowed:
+        logger.info(
+            "calendar_sync_state_not_enqueued task_id=%s reason=%s",
+            task.get("task_id"),
+            result.reason,
+        )
+        return
+
+    try:
+        create_sync_state(
+            task_id=task["task_id"],
+            sync_target="apple_calendar",
+            sync_status="pending",
+        )
+    except ValueError as exc:
+        logger.warning(
+            "calendar_sync_state_enqueue_failed task_id=%s error=%s",
+            task.get("task_id"),
+            str(exc),
+        )
+        raise
+
+
 # ── POST /api/tasks ────────────────────────────────────────────────────────
 
 
@@ -62,8 +95,9 @@ def create_task(request: Request, body: TaskCreateRequest):
             task_id, title, description, priority, status,
             start_time, due_time, timezone, location,
             need_weather_check, reminder_channels, created_channel,
+            sync_enabled, sync_targets,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             task_id,
@@ -78,6 +112,8 @@ def create_task(request: Request, body: TaskCreateRequest):
             1 if body.need_weather_check else 0,
             reminder_json,
             body.created_channel,
+            1 if body.sync_enabled else 0,
+            json.dumps(body.sync_targets, ensure_ascii=False),
             now,
             now,
         ),
@@ -85,6 +121,7 @@ def create_task(request: Request, body: TaskCreateRequest):
     conn.commit()
 
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+    _enqueue_calendar_sync_state_if_eligible(_task_to_eligibility_dict(row))
     logger.info("task_created task_id=%s title=REDACTED request_id=%s", task_id, getattr(request.state, "request_id", "?"))
     return _row_to_response(row)
 
