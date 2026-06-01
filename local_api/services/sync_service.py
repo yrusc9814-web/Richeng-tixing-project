@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from ..adapters import AdapterResult, SyncAdapter
 from ..config import ALLOWED_SYNC_TARGETS
 from ..database import get_db
+from ..sync_client.payload import compute_task_payload_hash
 from .sync_log_service import create_sync_log
 from .sync_eligibility import eligible_for_calendar_sync
 from .sync_state_service import (
@@ -223,6 +224,11 @@ class SyncService:
 
         # 7. Record result
         if push_result.success:
+            payload_hash_before = sync_state.get("payload_hash")
+            payload_hash_after = compute_task_payload_hash(task_data)
+            external_id_before = sync_state.get("external_id")
+            external_id_after = push_result.external_id
+
             transitioned, transition_error = _safe_transition(
                 sync_id, "synced", trigger="engine"
             )
@@ -241,20 +247,27 @@ class SyncService:
                     message=str(transition_error),
                     external_id=sync_state.get("external_id"),
                 )
-            # Update external_id on sync_state
+            # Update external_id and payload_hash on sync_state
             try:
                 from .sync_state_service import update_sync_state
 
                 update_sync_state(
                     sync_id,
-                    external_id=push_result.external_id,
+                    external_id=external_id_after,
                     last_synced_at=_iso_now(),
+                    payload_hash=payload_hash_after,
                 )
             except Exception as exc:
                 logger.warning(
                     "Could not update external_id for %s: %s", sync_id, exc,
                 )
-            _log_sync(sync_id, task_id, sync_target, push_result.sync_attempt)
+            _log_sync(
+                sync_id, task_id, sync_target, push_result.sync_attempt,
+                payload_hash_before=payload_hash_before,
+                payload_hash_after=payload_hash_after,
+                external_id_before=external_id_before,
+                external_id_after=external_id_after,
+            )
             return {
                 "success": True,
                 "sync_id": sync_id,
@@ -317,7 +330,16 @@ def _safe_transition(
         return None, exc
 
 
-def _log_sync(sync_id: str, task_id: str, target: str, attempt: int) -> None:
+def _log_sync(
+    sync_id: str,
+    task_id: str,
+    target: str,
+    attempt: int,
+    payload_hash_before: Optional[str] = None,
+    payload_hash_after: Optional[str] = None,
+    external_id_before: Optional[str] = None,
+    external_id_after: Optional[str] = None,
+) -> None:
     try:
         create_sync_log(
             sync_id=sync_id,
@@ -325,6 +347,10 @@ def _log_sync(sync_id: str, task_id: str, target: str, attempt: int) -> None:
             sync_target=target,
             sync_attempt=attempt,
             sync_result="success",
+            payload_hash_before=payload_hash_before,
+            payload_hash_after=payload_hash_after,
+            external_id_before=external_id_before,
+            external_id_after=external_id_after,
             triggered_by="sync_service",
         )
     except Exception as exc:

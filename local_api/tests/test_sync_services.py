@@ -26,6 +26,7 @@ from local_api.services.sync_log_service import (
 )
 from local_api.sync_client.payload import (
     compute_payload_hash,
+    compute_task_payload_hash,
     extract_task_payload,
 )
 
@@ -386,3 +387,27 @@ class TestPayload:
         assert payload["title"] == "Meeting"
         assert "extra_field" not in payload
         assert len(payload) == 9
+
+    def test_compute_task_payload_hash(self):
+        """Convenience helper produces consistent hash for the same logical task."""
+        row1 = {
+            "task_id": "task_hash",
+            "title": "Test",
+            "description": "Desc",
+            "priority": "P1",
+            "status": "pending",
+            "start_time": "2026-06-01T09:00:00",
+            "due_time": "2026-06-01T10:00:00",
+            "timezone": "Asia/Shanghai",
+            "location": "Room",
+        }
+        row2 = dict(row1)  # same data, different dict instance
+        h1 = compute_task_payload_hash(row1)
+        h2 = compute_task_payload_hash(row2)
+        assert h1 == h2
+        assert len(h1) == 64
+
+        # A different title should produce a different hash
+        row1["title"] = "Changed"
+        h3 = compute_task_payload_hash(row1)
+        assert h3 != h2

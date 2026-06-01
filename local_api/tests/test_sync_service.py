@@ -598,3 +598,37 @@ class TestSkippedConsistency:
         persisted = get_sync_state(state["sync_id"])
         assert persisted["sync_status"] == "synced"
         assert persisted["external_id"] == "ext_no_touch"
+
+
+# ── Phase 21 — Payload hash / drift wiring ─────────────────────────────
+
+
+class TestRunTaskSyncPayloadHash:
+    """SyncService stores payload_hash on sync_state and in sync_log."""
+
+    def test_success_stores_payload_hash_on_state(self):
+        """run_task_sync success stores a non-null SHA-256 payload_hash."""
+        _insert_task("task_svc_phash", sync_enabled=1)
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+
+        result = svc.run_task_sync("task_svc_phash", "apple_calendar")
+
+        assert result["success"] is True
+        state = get_sync_state(result["sync_id"])
+        assert state["payload_hash"] is not None
+        assert len(state["payload_hash"]) == 64
+
+    def test_success_log_includes_payload_hash_after(self):
+        """Success sync_log records payload_hash_before and payload_hash_after."""
+        _insert_task("task_svc_phash_log", sync_enabled=1)
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+
+        result = svc.run_task_sync("task_svc_phash_log", "apple_calendar")
+
+        logs = _logs(result["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "success"
+        assert logs[0]["payload_hash_before"] is None  # first sync
+        assert logs[0]["payload_hash_after"] is not None
+        assert len(logs[0]["payload_hash_after"]) == 64
+        assert logs[0]["external_id_after"] is not None

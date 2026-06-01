@@ -20,6 +20,7 @@ from .services.sync_state_service import (
     transition_sync_state,
     update_sync_state,
 )
+from .sync_client.payload import compute_task_payload_hash
 
 logger = logging.getLogger(__name__)
 
@@ -396,11 +397,17 @@ class SyncEngine:
                 push_result = adapter.push(task_data, sync)
 
                 if push_result.success:
+                    payload_hash_before = current.get("payload_hash")
+                    payload_hash_after = compute_task_payload_hash(task_data)
+                    external_id_before = current.get("external_id")
+                    external_id_after = push_result.external_id
+
                     transition_sync_state(sync_id, "synced", trigger="engine")
                     update_sync_state(
                         sync_id,
-                        external_id=push_result.external_id,
+                        external_id=external_id_after,
                         last_synced_at=_now().isoformat(),
+                        payload_hash=payload_hash_after,
                     )
                     create_sync_log(
                         sync_id=sync_id,
@@ -408,6 +415,10 @@ class SyncEngine:
                         sync_target=sync_target,
                         sync_attempt=attempt,
                         sync_result="success",
+                        payload_hash_before=payload_hash_before,
+                        payload_hash_after=payload_hash_after,
+                        external_id_before=external_id_before,
+                        external_id_after=external_id_after,
                         triggered_by="sync_engine",
                     )
                 else:

@@ -15,11 +15,13 @@ from ..database import get_db
 from ..models import TaskCreateRequest, TaskUpdateRequest, TaskResponse, TaskListResponse
 from ..config import MAX_LIMIT, DEFAULT_LIMIT, ALLOWED_PRIORITIES, ALLOWED_STATUSES
 from ..services.sync_eligibility import eligible_for_calendar_sync
+from ..services.sync_log_service import create_sync_log
 from ..services.sync_state_service import (
     create_sync_state,
     get_sync_state_by_key,
     transition_sync_state,
 )
+from ..sync_client.payload import compute_task_payload_hash
 from ..adapters.apple_adapter import AppleSyncAdapter
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
@@ -104,15 +106,62 @@ def _ensure_pending_calendar_sync_state_if_eligible(task: dict) -> None:
 
 
 def _sync_calendar_state_after_task_update(before: dict, after: dict) -> None:
-    """Maintain apple_calendar sync_state after task updates without writing Calendar."""
+    """Maintain apple_calendar sync_state after task updates without writing Calendar.
+
+    Phase 21: uses payload_hash comparison for drift detection when available.
+    Falls back to field-diff for legacy rows with no stored hash.
+    """
     existing = get_sync_state_by_key(after["task_id"], _CALENDAR_SYNC_TARGET)
+
+    # Only process synced Calendar records with an external_id
     if (
         existing is not None
         and existing.get("sync_status") == "synced"
         and existing.get("external_id")
-        and _sync_relevant_fields_changed(before, after)
     ):
-        transition_sync_state(existing["sync_id"], "stale", trigger="trigger")
+        stored_hash = existing.get("payload_hash")
+
+        if stored_hash is not None:
+            # Phase 21: hash-based drift detection
+            after_hash = compute_task_payload_hash(after)
+            if stored_hash == after_hash:
+                # No change in sync-relevant fields — stay synced
+                return
+
+            # Drift detected — mark stale and write drift log
+            transition_sync_state(existing["sync_id"], "stale", trigger="trigger")
+
+            # Collect which sync-relevant fields actually changed
+            changed_fields = sorted(
+                f for f in _SYNC_RELEVANT_TASK_FIELDS
+                if before.get(f) != after.get(f)
+            )
+            drift_fields = ",".join(changed_fields) if changed_fields else None
+
+            try:
+                create_sync_log(
+                    sync_id=existing["sync_id"],
+                    local_task_id=after["task_id"],
+                    sync_target=_CALENDAR_SYNC_TARGET,
+                    sync_result="drift_detected",
+                    drift_detected=True,
+                    drift_fields=drift_fields,
+                    payload_hash_before=stored_hash,
+                    payload_hash_after=after_hash,
+                    external_id_before=existing["external_id"],
+                    external_id_after=existing["external_id"],
+                    triggered_by="system",
+                )
+            except Exception:
+                logger.warning(
+                    "drift_log_write_failed task_id=%s sync_id=%s",
+                    after["task_id"], existing["sync_id"],
+                )
+            return
+
+        # Legacy fallback: no stored payload_hash — use field-diff
+        if _sync_relevant_fields_changed(before, after):
+            transition_sync_state(existing["sync_id"], "stale", trigger="trigger")
         return
 
     if existing is None or existing.get("sync_status") != "synced":

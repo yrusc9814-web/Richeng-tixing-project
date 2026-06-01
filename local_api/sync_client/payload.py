@@ -15,6 +15,16 @@ def compute_payload_hash(task_data: dict[str, Any]) -> str:
     return hashlib.sha256(normalised.encode("utf-8")).hexdigest()
 
 
+def compute_task_payload_hash(task_row: dict[str, Any]) -> str:
+    """Convenience helper: extract sync-relevant payload from a task row and hash it.
+
+    Equivalent to ``compute_payload_hash(extract_task_payload(task_row))``.
+    Kept intentionally minimal — used by sync_engine, sync_service, and tasks.py
+    for drift detection without duplicating the extract+hash chain.
+    """
+    return compute_payload_hash(extract_task_payload(task_row))
+
+
 def extract_task_payload(task_row: dict[str, Any]) -> dict[str, Any]:
     """Extract the sync-relevant fields from a full task row.
 

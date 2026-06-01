@@ -496,3 +496,37 @@ def test_adapter_cycle_refuses_skipped_without_success_log():
     assert len(logs) == 1
     assert logs[0]["sync_result"] == "skipped"
     assert logs[0]["error_code"] == "invalid_transition"
+
+
+# ── Phase 21 — Payload hash / drift wiring ──────────────────────────────
+
+
+def test_pending_to_synced_stores_payload_hash():
+    """Adapter success stores a non-null payload_hash on sync_state."""
+    sync = _sync("task_engine_phash_store")
+    engine = SyncEngine(adapters=_adapters())
+
+    engine.scan_once()
+
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "synced"
+    assert state["payload_hash"] is not None
+    assert len(state["payload_hash"]) == 64  # SHA-256 hex
+
+
+def test_sync_success_log_includes_payload_hashes():
+    """Success sync_log records payload_hash_before and payload_hash_after."""
+    sync = _sync("task_engine_phash_log")
+    engine = SyncEngine(adapters=_adapters())
+
+    engine.scan_once()
+
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["sync_result"] == "success"
+    # Before first sync, payload_hash_before should be None
+    assert logs[0]["payload_hash_before"] is None
+    assert logs[0]["payload_hash_after"] is not None
+    assert len(logs[0]["payload_hash_after"]) == 64
+    # external_id_after should be set
+    assert logs[0]["external_id_after"] is not None
