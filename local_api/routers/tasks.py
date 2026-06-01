@@ -381,3 +381,26 @@ def complete_task(request: Request, task_id: str):
     _cleanup_calendar_on_terminal(task_id)
     logger.info("task_completed task_id=%s request_id=%s", task_id, getattr(request.state, "request_id", "?"))
     return _row_to_response(row)
+
+
+# ── DELETE /api/tasks/{task_id} ──────────────────────────────────────────────
+
+
+@router.delete("/{task_id}", status_code=204)
+def delete_task(request: Request, task_id: str):
+    """Delete a task. Cleans up Calendar event before deletion if one exists."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+
+    _cleanup_calendar_on_terminal(task_id)
+
+    try:
+        conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    logger.info("task_deleted task_id=%s request_id=%s", task_id, getattr(request.state, "request_id", "?"))
