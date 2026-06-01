@@ -67,6 +67,7 @@ _SYNC_RELEVANT_TASK_FIELDS = {
     "timezone",
     "location",
     "priority",
+    "status",
 }
 
 

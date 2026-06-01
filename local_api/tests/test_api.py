@@ -642,6 +642,46 @@ class TestUpdateTask:
         assert drift["external_id_before"] == "calendar-drift-001"
         assert drift["external_id_after"] == "calendar-drift-001"
 
+    def test_synced_task_patch_status_detects_drift(self):
+        """Patch only status on a synced Calendar task → stale + drift log with status in drift_fields."""
+        task_id = self._create_calendar_task(title="Status drift test")
+        sync_id = self._mark_calendar_synced(task_id, external_id="calendar-drift-status")
+
+        from local_api.sync_client.payload import compute_task_payload_hash
+        conn = get_db()
+        task_row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+        stored_hash = compute_task_payload_hash(dict(task_row))
+        conn.execute(
+            "UPDATE sync_state SET payload_hash = ? WHERE sync_id = ?",
+            (stored_hash, sync_id),
+        )
+        conn.commit()
+
+        # Patch only status — must be detected as drift with drift_fields including "status"
+        resp = client.patch(
+            f"/api/tasks/{task_id}",
+            json={"status": "completed"},
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        rows = self._calendar_sync_rows(task_id)
+        assert len(rows) == 1
+        assert rows[0]["sync_status"] == "stale"
+        assert rows[0]["payload_hash"] == stored_hash
+
+        from local_api.services.sync_log_service import list_sync_logs
+        logs, _ = list_sync_logs(sync_id=sync_id)
+        drift_logs = [l for l in logs if l["sync_result"] == "drift_detected"]
+        assert len(drift_logs) == 1
+        drift = drift_logs[0]
+        assert drift["drift_detected"] == 1
+        assert drift["payload_hash_before"] == stored_hash
+        assert drift["payload_hash_after"] is not None
+        assert drift["payload_hash_after"] != stored_hash
+        # drift_fields must include "status"
+        assert "status" in (drift["drift_fields"] or "")
+
     def test_synced_task_patch_non_sync_field_no_drift(self):
         """Patch need_weather_check on a synced task → stays synced, no drift log."""
         task_id = self._create_calendar_task(title="No drift test")
