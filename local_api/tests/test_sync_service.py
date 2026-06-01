@@ -182,12 +182,11 @@ class TestRouteAdapter:
         assert adapter is not None
         assert adapter.target_name == "apple_calendar"
 
-    def test_routes_apple_reminder_via_prefix_match(self):
-        """apple_reminder routes to apple_calendar adapter (prefix match)."""
+    def test_apple_reminder_does_not_route_to_calendar_adapter(self):
+        """apple_reminder must not route via the apple_calendar adapter."""
         svc = SyncService(adapters=[MockSuccessAdapter()])
         adapter = svc._route_adapter("apple_reminder")
-        assert adapter is not None
-        assert adapter.target_name == "apple_calendar"
+        assert adapter is None
 
     def test_returns_none_for_unregistered_target(self):
         svc = SyncService(adapters=[MockSuccessAdapter()])
@@ -196,6 +195,12 @@ class TestRouteAdapter:
     def test_returns_none_when_no_adapters(self):
         svc = SyncService()
         assert svc._route_adapter("apple_calendar") is None
+
+    def test_apple_prefix_is_not_used_for_routing(self):
+        """Only exact sync_target matches may route to a registered adapter."""
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+        assert svc._route_adapter("apple_calendar") is not None
+        assert svc._route_adapter("apple_reminder") is None
 
 
 # ── Tests: run_task_sync — success path ───────────────────────────────
@@ -371,6 +376,19 @@ class TestRunTaskSyncError:
         assert result["success"] is False
         assert result["sync_status"] == "failed_permanent"
         assert result["error_code"] == "adapter_not_found"
+
+    def test_apple_reminder_is_explicitly_unsupported_without_calendar_push(self):
+        _insert_task("task_svc_reminder", sync_enabled=1, sync_targets='["apple_reminder"]')
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_svc_reminder", "apple_reminder")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "skipped"
+        assert result["error_code"] == "unsupported_target"
+        assert adapter.push_count == 0
+        assert get_sync_state_by_key("task_svc_reminder", "apple_reminder") is None
 
     def test_retryable_failure_returns_failed_status(self):
         _insert_task("task_svc_retry", sync_enabled=1)

@@ -13,8 +13,13 @@ from zoneinfo import ZoneInfo
 from . import config
 from .adapters import SyncAdapter
 from .database import get_db
+from .services.sync_eligibility import eligible_for_calendar_sync
 from .services.sync_log_service import create_sync_log
-from .services.sync_state_service import get_sync_state, transition_sync_state
+from .services.sync_state_service import (
+    get_sync_state,
+    transition_sync_state,
+    update_sync_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -262,12 +267,10 @@ class SyncEngine:
         """Find the first adapter that matches the sync_target.
 
         Rules:
-        - 'apple_calendar' or 'apple_reminder' → MockAppleAdapter (target_name='apple_calendar')
-        - 'weather' → MockWeatherAdapter
+        - exact match → adapter with matching target_name
+        - apple_reminder must not fall through to the Calendar adapter
         """
         for adapter in self._adapters:
-            if sync_target.startswith("apple_") and adapter.target_name == "apple_calendar":
-                return adapter
             if adapter.target_name == sync_target:
                 return adapter
         return None
@@ -345,12 +348,41 @@ class SyncEngine:
 
                 task_data = dict(task_row)
 
-                # 4. Execute push
+                # 4. Recheck Calendar eligibility immediately before push.
+                if sync_target == "apple_calendar":
+                    eligibility = eligible_for_calendar_sync(task_data, sync_target)
+                    if not eligibility.allowed:
+                        transition_sync_state(
+                            sync_id,
+                            "failed_permanent",
+                            trigger="engine",
+                        )
+                        create_sync_log(
+                            sync_id=sync_id,
+                            local_task_id=task_id,
+                            sync_target=sync_target,
+                            sync_attempt=self._max_attempt(sync_id) + 1,
+                            sync_result="failed",
+                            error_code=eligibility.reason,
+                            error_message=(
+                                "Calendar sync eligibility failed: "
+                                f"{eligibility.reason}"
+                            ),
+                            triggered_by="sync_engine",
+                        )
+                        continue
+
+                # 5. Execute push
                 attempt = self._max_attempt(sync_id) + 1
                 push_result = adapter.push(task_data, sync)
 
                 if push_result.success:
                     transition_sync_state(sync_id, "synced", trigger="engine")
+                    update_sync_state(
+                        sync_id,
+                        external_id=push_result.external_id,
+                        last_synced_at=_now().isoformat(),
+                    )
                     create_sync_log(
                         sync_id=sync_id,
                         local_task_id=task_id,

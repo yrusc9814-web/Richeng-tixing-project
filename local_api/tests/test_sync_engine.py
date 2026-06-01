@@ -14,6 +14,7 @@ from local_api.services.sync_state_service import (
     create_sync_state,
     get_sync_state,
     transition_sync_state,
+    update_sync_state,
 )
 from local_api.sync_engine import ScanResult, SyncEngine
 
@@ -43,9 +44,18 @@ def _insert_task(task_id: str) -> None:
     now = _iso(_now())
     conn.execute(
         """INSERT INTO tasks (
-            task_id, title, status, priority, created_channel, created_at, updated_at
-        ) VALUES (?, ?, 'pending', 'P2', 'api_test', ?, ?)""",
-        (task_id, f"Task {task_id}", now, now),
+            task_id, title, status, priority, start_time, due_time,
+            created_channel, created_at, updated_at, sync_enabled, sync_targets
+        ) VALUES (?, ?, 'pending', 'P2', ?, ?, 'api_test', ?, ?, 1, ?)""",
+        (
+            task_id,
+            f"Task {task_id}",
+            "2026-06-01T10:00:00+08:00",
+            "2026-06-01T10:30:00+08:00",
+            now,
+            now,
+            '["apple_calendar"]',
+        ),
     )
     conn.commit()
 
@@ -278,6 +288,7 @@ def test_start_stop_lifecycle():
 
 # ── Phase 8A — Adapter integration tests ────────────────────────────────────
 
+from local_api.adapters import AdapterResult
 from local_api.adapters.apple_adapter import MockAppleAdapter
 from local_api.adapters.weather_adapter import MockWeatherAdapter
 
@@ -342,7 +353,7 @@ def test_route_adapter_returns_none_for_no_match():
 
 
 def test_route_adapter_returns_apple_for_apple_targets():
-    """_route_adapter returns MockAppleAdapter for any apple_* target."""
+    """_route_adapter routes Apple targets only by exact adapter target."""
     engine = SyncEngine(adapters=[MockAppleAdapter()])
 
     route_cal = engine._route_adapter("apple_calendar")
@@ -350,5 +361,104 @@ def test_route_adapter_returns_apple_for_apple_targets():
     assert route_cal.target_name == "apple_calendar"
 
     route_rem = engine._route_adapter("apple_reminder")
-    assert route_rem is not None
-    assert route_rem.target_name == "apple_calendar"
+    assert route_rem is None
+
+
+def test_apple_reminder_pending_does_not_route_to_calendar_adapter():
+    """apple_reminder must not fall through to the Calendar adapter."""
+
+    class CountingCalendarAdapter(MockAppleAdapter):
+        def __init__(self):
+            self.push_count = 0
+
+        def push(self, task_data: dict, sync_state: dict):
+            self.push_count += 1
+            return super().push(task_data, sync_state)
+
+    sync = _sync("task_engine_reminder_isolated", target="apple_reminder")
+    adapter = CountingCalendarAdapter()
+    engine = SyncEngine(adapters=[adapter])
+
+    result = engine.scan_once()
+
+    assert result.pending_picked == 1
+    assert adapter.push_count == 0
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "failed_permanent"
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["error_code"] == "adapter_not_found"
+
+
+def test_adapter_cycle_rechecks_calendar_eligibility_before_push():
+    """A pending record whose task is no longer eligible must not be pushed."""
+
+    class CountingCalendarAdapter(MockAppleAdapter):
+        def __init__(self):
+            self.push_count = 0
+
+        def push(self, task_data: dict, sync_state: dict):
+            self.push_count += 1
+            return super().push(task_data, sync_state)
+
+    blocked = _sync("task_engine_recheck_blocked")
+    allowed = _sync("task_engine_recheck_allowed")
+    conn = get_db()
+    conn.execute(
+        "UPDATE tasks SET sync_enabled = 0 WHERE task_id = ?",
+        (blocked["task_id"],),
+    )
+    conn.commit()
+    adapter = CountingCalendarAdapter()
+
+    result = SyncEngine(adapters=[adapter]).scan_once()
+
+    assert result.pending_picked == 2
+    assert adapter.push_count == 1
+    blocked_state = get_sync_state(blocked["sync_id"])
+    allowed_state = get_sync_state(allowed["sync_id"])
+    assert blocked_state["sync_status"] == "failed_permanent"
+    assert blocked_state["external_id"] is None
+    assert allowed_state["sync_status"] == "synced"
+    logs = _logs(blocked["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["error_code"] == "sync_disabled"
+    assert logs[0]["sync_result"] == "failed"
+
+
+def test_stale_repush_preserves_existing_external_id_for_calendar_update():
+    """Stale Calendar records must update by external_id instead of duplicating."""
+
+    class UpdatingCalendarAdapter(MockAppleAdapter):
+        def __init__(self):
+            self.seen_external_ids: list[str | None] = []
+            self.created_count = 0
+
+        def push(self, task_data: dict, sync_state: dict):
+            external_id = sync_state.get("external_id")
+            self.seen_external_ids.append(external_id)
+            if external_id:
+                return AdapterResult(
+                    success=True,
+                    external_id=external_id,
+                    sync_result="success",
+                )
+            self.created_count += 1
+            return super().push(task_data, sync_state)
+
+    sync = _sync("task_engine_stale_idempotent", status="synced")
+    update_sync_state(sync["sync_id"], external_id="calendar_event_existing")
+    transition_sync_state(sync["sync_id"], "stale", trigger="trigger")
+    adapter = UpdatingCalendarAdapter()
+    engine = SyncEngine(adapters=[adapter])
+
+    stale_result = engine.scan_once()
+    push_result = engine.scan_once()
+
+    assert stale_result.stale_triggered == 1
+    assert push_result.pending_picked == 1
+    assert adapter.seen_external_ids == ["calendar_event_existing"]
+    assert adapter.created_count == 0
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "synced"
+    assert state["external_id"] == "calendar_event_existing"

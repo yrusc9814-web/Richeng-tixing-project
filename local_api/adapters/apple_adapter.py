@@ -299,7 +299,7 @@ class AppleSyncAdapter(SyncAdapter):
         )
 
     def _push_real(self, task_data: dict, sync_state: dict) -> AdapterResult:
-        """Create one real Apple Calendar event via EventKit.
+        """Create or update one real Apple Calendar event via EventKit.
 
         Phase 18B intentionally supports Calendar only. Reminders are not
         touched from this method.
@@ -333,23 +333,29 @@ class AppleSyncAdapter(SyncAdapter):
                     error_message="Calendar TCC permission is not granted for this Python process.",
                 )
 
-            default_calendar = store.defaultCalendarForNewEvents()
-            if default_calendar is None:
-                return AdapterResult(
-                    success=False,
-                    sync_result="failed",
-                    error_code="calendar_unavailable",
-                    error_message="No default Apple Calendar is available for new events.",
-                )
-
             title = self._real_event_title(task_data)
             start_dt, end_dt = self._real_event_window(task_data)
 
-            event = EventKit.EKEvent.eventWithEventStore_(store)
+            event = self._find_real_event_by_external_id(
+                store,
+                Foundation,
+                str(sync_state.get("external_id") or ""),
+            )
+            if event is None:
+                default_calendar = store.defaultCalendarForNewEvents()
+                if default_calendar is None:
+                    return AdapterResult(
+                        success=False,
+                        sync_result="failed",
+                        error_code="calendar_unavailable",
+                        error_message="No default Apple Calendar is available for new events.",
+                    )
+                event = EventKit.EKEvent.eventWithEventStore_(store)
+                event.setCalendar_(default_calendar)
+
             event.setTitle_(title)
             event.setStartDate_(Foundation.NSDate.dateWithTimeIntervalSince1970_(start_dt.timestamp()))
             event.setEndDate_(Foundation.NSDate.dateWithTimeIntervalSince1970_(end_dt.timestamp()))
-            event.setCalendar_(default_calendar)
 
             notes = self._real_event_notes(task_data, sync_state)
             if notes:
@@ -387,6 +393,29 @@ class AppleSyncAdapter(SyncAdapter):
         if title.startswith(_SYNC_TEST_PREFIX):
             return title
         return title
+
+    @staticmethod
+    def _find_real_event_by_external_id(store, foundation, external_id: str):
+        if not external_id:
+            return None
+
+        if hasattr(store, "calendarItemWithIdentifier_"):
+            event = store.calendarItemWithIdentifier_(external_id)
+            if event is not None:
+                return event
+
+        pred = store.predicateForEventsWithStartDate_endDate_calendars_(
+            foundation.NSDate.dateWithTimeIntervalSinceNow_(-86400 * 30),
+            foundation.NSDate.dateWithTimeIntervalSinceNow_(86400 * 365),
+            None,
+        )
+        events = store.eventsMatchingPredicate_(pred)
+        if events is None:
+            return None
+        for event in events:
+            if str(event.eventIdentifier()) == external_id:
+                return event
+        return None
 
     @staticmethod
     def _real_event_notes(task_data: dict, sync_state: dict) -> str:

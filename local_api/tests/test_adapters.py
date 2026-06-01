@@ -12,6 +12,7 @@ Run with:
 from __future__ import annotations
 
 import sys
+import types
 from typing import Optional
 
 import pytest
@@ -42,6 +43,106 @@ def clean_db():
 _SAMPLE_TASK = {"title": "Team standup", "task_id": "task_001", "priority": "P2"}
 _SAMPLE_STATE = {"sync_id": "sync_001", "sync_target": "apple_calendar"}
 _SAMPLE_STATE_REMINDER = {"sync_id": "sync_002", "sync_target": "apple_reminder"}
+
+
+class _FakeNSDate:
+    @staticmethod
+    def dateWithTimeIntervalSince1970_(timestamp):
+        return ("date", timestamp)
+
+    @staticmethod
+    def dateWithTimeIntervalSinceNow_(seconds):
+        return ("date_now", seconds)
+
+
+class _FakeEvent:
+    def __init__(self, identifier: str = "new_event"):
+        self._identifier = identifier
+        self.title_value = None
+        self.notes_value = None
+        self.location_value = None
+        self.calendar_value = None
+
+    def eventIdentifier(self):
+        return self._identifier
+
+    def setTitle_(self, value):
+        self.title_value = value
+
+    def setStartDate_(self, value):
+        self.start_date_value = value
+
+    def setEndDate_(self, value):
+        self.end_date_value = value
+
+    def setCalendar_(self, value):
+        self.calendar_value = value
+
+    def setNotes_(self, value):
+        self.notes_value = value
+
+    def setLocation_(self, value):
+        self.location_value = value
+
+
+class _FakeEKEvent:
+    created_count = 0
+
+    @staticmethod
+    def eventWithEventStore_(store):
+        _FakeEKEvent.created_count += 1
+        event = _FakeEvent(f"new_event_{_FakeEKEvent.created_count}")
+        store.created_events.append(event)
+        return event
+
+
+class _FakeStore:
+    def __init__(self, events=None, default_calendar="default_calendar"):
+        self.events = list(events or [])
+        self.saved_events = []
+        self.created_events = []
+        self.default_calendar = default_calendar
+
+    def accessGrantedForEntityType_(self, entity_type):
+        return True
+
+    def defaultCalendarForNewEvents(self):
+        return self.default_calendar
+
+    def predicateForEventsWithStartDate_endDate_calendars_(self, start, end, calendars):
+        return ("predicate", start, end, calendars)
+
+    def eventsMatchingPredicate_(self, predicate):
+        return self.events
+
+    def saveEvent_span_error_(self, event, span, error):
+        self.saved_events.append(event)
+        return (True, None)
+
+
+class _FakeStoreFactory:
+    def __init__(self, store):
+        self.store = store
+
+    def alloc(self):
+        return self
+
+    def init(self):
+        return self.store
+
+
+def _install_fake_eventkit(monkeypatch, store):
+    _FakeEKEvent.created_count = 0
+    eventkit = types.SimpleNamespace(
+        EKEntityTypeEvent="event",
+        EKSpanThisEvent="this_event",
+        EKEventStore=_FakeStoreFactory(store),
+        EKEvent=_FakeEKEvent,
+    )
+    foundation = types.SimpleNamespace(NSDate=_FakeNSDate)
+    monkeypatch.setitem(sys.modules, "EventKit", eventkit)
+    monkeypatch.setitem(sys.modules, "Foundation", foundation)
+    return eventkit
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -361,6 +462,98 @@ class TestAppleSyncAdapterRealMode:
         assert result.success is False
         assert result.sync_result == "failed"
         assert result.error_code == "dependency_missing"
+
+    def test_real_mode_calendar_updates_existing_external_id_without_new_event(self, monkeypatch):
+        """A stale/pending push with external_id updates the existing Calendar event."""
+        existing = _FakeEvent("event_existing_001")
+        store = _FakeStore(events=[existing])
+        _install_fake_eventkit(monkeypatch, store)
+        adapter = AppleSyncAdapter(target="apple_calendar")
+        state = {
+            "sync_id": "sync_existing",
+            "sync_target": "apple_calendar",
+            "external_id": "event_existing_001",
+        }
+
+        result = adapter._push_real(
+            {
+                "task_id": "task_existing",
+                "title": "Updated title",
+                "start_time": "2026-06-01T10:00:00+08:00",
+                "due_time": "2026-06-01T10:30:00+08:00",
+            },
+            state,
+        )
+
+        assert result.success is True
+        assert result.external_id == "event_existing_001"
+        assert _FakeEKEvent.created_count == 0
+        assert store.saved_events == [existing]
+        assert existing.title_value == "Updated title"
+
+    def test_real_mode_calendar_update_does_not_require_default_calendar(self, monkeypatch):
+        """Updating an existing event must not require a calendar for new events."""
+        existing = _FakeEvent("event_no_default_calendar")
+        store = _FakeStore(events=[existing], default_calendar=None)
+        _install_fake_eventkit(monkeypatch, store)
+        adapter = AppleSyncAdapter(target="apple_calendar")
+
+        result = adapter._push_real(
+            {
+                "task_id": "task_existing_no_default",
+                "title": "Updated without default calendar",
+                "start_time": "2026-06-01T10:00:00+08:00",
+                "due_time": "2026-06-01T10:30:00+08:00",
+            },
+            {
+                "sync_id": "sync_existing_no_default",
+                "sync_target": "apple_calendar",
+                "external_id": "event_no_default_calendar",
+            },
+        )
+
+        assert result.success is True
+        assert result.external_id == "event_no_default_calendar"
+        assert _FakeEKEvent.created_count == 0
+        assert store.saved_events == [existing]
+
+    def test_real_mode_calendar_creates_only_when_external_id_not_found(self, monkeypatch):
+        """Missing external_id target falls back to one new Calendar event."""
+        store = _FakeStore(events=[_FakeEvent("different_event")])
+        _install_fake_eventkit(monkeypatch, store)
+        adapter = AppleSyncAdapter(target="apple_calendar")
+
+        result = adapter._push_real(
+            {
+                "task_id": "task_new",
+                "title": "New title",
+                "start_time": "2026-06-01T10:00:00+08:00",
+                "due_time": "2026-06-01T10:30:00+08:00",
+            },
+            {
+                "sync_id": "sync_new",
+                "sync_target": "apple_calendar",
+                "external_id": "missing_event",
+            },
+        )
+
+        assert result.success is True
+        assert result.external_id == "new_event_1"
+        assert _FakeEKEvent.created_count == 1
+        assert store.saved_events == store.created_events
+
+    def test_dry_run_and_test_mode_do_not_reach_real_calendar_write(self, monkeypatch):
+        def fail_push_real(self, task_data, sync_state):
+            raise AssertionError("real Calendar write must not be reached")
+
+        monkeypatch.setattr(AppleSyncAdapter, "_is_macos", staticmethod(lambda: True))
+        monkeypatch.setattr(AppleSyncAdapter, "_push_real", fail_push_real)
+
+        dry_run = AppleSyncAdapter(target="apple_calendar", dry_run=True)
+        test_mode = AppleSyncAdapter(target="apple_calendar", test_mode=True)
+
+        assert dry_run.push(_SAMPLE_TASK, _SAMPLE_STATE).sync_result == "skipped"
+        assert test_mode.push(_SAMPLE_TASK, _SAMPLE_STATE).success is True
 
 
 # ═══════════════════════════════════════════════════════════════════════════

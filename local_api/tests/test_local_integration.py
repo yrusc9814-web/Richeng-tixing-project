@@ -138,13 +138,12 @@ class TestAppleAdapterDirectSafety:
         assert valid is False
         assert "macOS" in msg
 
-    def test_apple_reminder_routes_to_calendar_adapter(self):
-        """Verify that apple_reminder target routes correctly through SyncService._route_adapter."""
+    def test_apple_reminder_does_not_route_to_calendar_adapter(self):
+        """apple_reminder must not fall through to the Calendar adapter."""
         adapter = AppleSyncAdapter(target="apple_calendar", dry_run=True)
         service = SyncService(adapters=[adapter])
         routed = service._route_adapter("apple_reminder")
-        assert routed is not None
-        assert routed.target_name == "apple_calendar"
+        assert routed is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -352,4 +351,3 @@ class TestCrossLayerOutputStructure:
             result = channel.send_reminder("task_cs_005", {"title": "x"})
         assert result.error_code is not None
         assert result.error_message is not None
-

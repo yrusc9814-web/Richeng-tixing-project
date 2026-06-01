@@ -51,12 +51,10 @@ class SyncService:
         """Find the first adapter that matches sync_target.
 
         Routing rules (mirror of SyncEngine._route_adapter):
-        - 'apple_calendar' or 'apple_reminder' → adapter with target_name='apple_calendar'
         - exact match → adapter with matching target_name
+        - apple_reminder must not fall through to the Calendar adapter
         """
         for adapter in self._adapters:
-            if sync_target.startswith("apple_") and adapter.target_name == "apple_calendar":
-                return adapter
             if adapter.target_name == sync_target:
                 return adapter
         return None
