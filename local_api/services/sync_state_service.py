@@ -77,23 +77,27 @@ def create_sync_state(
     if existing:
         raise ValueError(f"Sync state already exists for key: {sync_key}")
 
-    conn.execute(
-        """INSERT INTO sync_state (
-            sync_id, task_id, sync_target, sync_key, payload_hash,
-            sync_status, sync_version, external_id,
-            last_synced_at, last_sync_trigger,
-            started_at, locked_at,
-            created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            sync_id, task_id, sync_target, sync_key, payload_hash,
-            sync_status, 1, external_id,
-            None, None,
-            None, None,
-            now, now,
-        ),
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            """INSERT INTO sync_state (
+                sync_id, task_id, sync_target, sync_key, payload_hash,
+                sync_status, sync_version, external_id,
+                last_synced_at, last_sync_trigger,
+                started_at, locked_at,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                sync_id, task_id, sync_target, sync_key, payload_hash,
+                sync_status, 1, external_id,
+                None, None,
+                None, None,
+                now, now,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     row = conn.execute(
         "SELECT * FROM sync_state WHERE sync_id = ?", (sync_id,)
@@ -188,8 +192,9 @@ def update_sync_state(
     if sync_status is not None:
         if sync_status not in ALLOWED_SYNC_STATUSES:
             raise ValueError(f"Invalid sync_status: {sync_status}")
-        updates.append("sync_status = ?")
-        params.append(sync_status)
+        raise ValueError(
+            "sync_status updates must use transition_sync_state"
+        )
 
     if sync_version is not None:
         updates.append("sync_version = ?")
@@ -218,11 +223,15 @@ def update_sync_state(
     params.append(now)
     params.append(sync_id)
 
-    conn.execute(
-        f"UPDATE sync_state SET {', '.join(updates)} WHERE sync_id = ?",
-        params,
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            f"UPDATE sync_state SET {', '.join(updates)} WHERE sync_id = ?",
+            params,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     row = conn.execute(
         "SELECT * FROM sync_state WHERE sync_id = ?", (sync_id,)
@@ -233,8 +242,12 @@ def update_sync_state(
 def delete_sync_state(sync_id: str) -> bool:
     """Delete a sync_state record by sync_id. Returns True if deleted."""
     conn = get_db()
-    cursor = conn.execute("DELETE FROM sync_state WHERE sync_id = ?", (sync_id,))
-    conn.commit()
+    try:
+        cursor = conn.execute("DELETE FROM sync_state WHERE sync_id = ?", (sync_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return cursor.rowcount > 0
 
 
@@ -273,8 +286,8 @@ def transition_sync_state(
         return dict(existing)
 
     now = _iso_now()
-    updates = ["sync_status = ?", "updated_at = ?"]
-    params = [to_sync_status, now]
+    updates = ["sync_status = ?", "last_sync_trigger = ?", "updated_at = ?"]
+    params = [to_sync_status, trigger, now]
 
     if to_sync_status == "in_progress":
         # started_at: only set on the very first entry to in_progress
@@ -286,11 +299,15 @@ def transition_sync_state(
         params.append(now)
 
     params.append(sync_id)
-    conn.execute(
-        f"UPDATE sync_state SET {', '.join(updates)} WHERE sync_id = ?",
-        params,
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            f"UPDATE sync_state SET {', '.join(updates)} WHERE sync_id = ?",
+            params,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     row = conn.execute(
         "SELECT * FROM sync_state WHERE sync_id = ?", (sync_id,)

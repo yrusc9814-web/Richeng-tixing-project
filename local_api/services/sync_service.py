@@ -192,7 +192,17 @@ class SyncService:
                 )
 
         # 7. Transition to in_progress
-        _safe_transition(sync_id, "in_progress", trigger="engine")
+        transitioned, transition_error = _safe_transition(
+            sync_id, "in_progress", trigger="engine"
+        )
+        if transitioned is None:
+            return _error_result(
+                sync_id=sync_id,
+                status=sync_state.get("sync_status", "skipped"),
+                code="invalid_transition",
+                message=str(transition_error),
+                external_id=sync_state.get("external_id"),
+            )
 
         # 8. Execute push
         try:
@@ -213,7 +223,24 @@ class SyncService:
 
         # 7. Record result
         if push_result.success:
-            _safe_transition(sync_id, "synced", trigger="engine")
+            transitioned, transition_error = _safe_transition(
+                sync_id, "synced", trigger="engine"
+            )
+            if transitioned is None:
+                _log_failure(
+                    sync_id, task_id, sync_target,
+                    attempt=push_result.sync_attempt,
+                    code="invalid_transition",
+                    message=str(transition_error),
+                )
+                current = get_sync_state_by_key(task_id, sync_target)
+                return _error_result(
+                    sync_id=sync_id,
+                    status=current.get("sync_status") if current else "failed",
+                    code="invalid_transition",
+                    message=str(transition_error),
+                    external_id=sync_state.get("external_id"),
+                )
             # Update external_id on sync_state
             try:
                 from .sync_state_service import update_sync_state
@@ -275,14 +302,19 @@ def _error_result(
     }
 
 
-def _safe_transition(sync_id: str, to_status: str, trigger: str = "service") -> None:
-    """Transition sync_state, swallowing non-critical errors."""
+def _safe_transition(
+    sync_id: str,
+    to_status: str,
+    trigger: str = "service",
+) -> tuple[Optional[dict], Optional[Exception]]:
+    """Transition sync_state and return errors to callers that must stop."""
     try:
-        transition_sync_state(sync_id, to_status, trigger=trigger)
+        return transition_sync_state(sync_id, to_status, trigger=trigger), None
     except Exception as exc:
         logger.warning(
             "Could not transition %s to %s: %s", sync_id, to_status, exc,
         )
+        return None, exc
 
 
 def _log_sync(sync_id: str, task_id: str, target: str, attempt: int) -> None:

@@ -13,6 +13,7 @@ from local_api.services.sync_state_service import (
     get_sync_state,
     get_sync_state_by_key,
     list_sync_states,
+    transition_sync_state,
     update_sync_state,
     delete_sync_state,
     _build_sync_key,
@@ -138,16 +139,43 @@ class TestSyncStateService:
         record = create_sync_state(task_id="task_ss_09", sync_target="apple_calendar")
         updated = update_sync_state(
             record["sync_id"],
-            sync_status="synced",
             external_id="ext_999",
         )
         assert updated is not None
-        assert updated["sync_status"] == "synced"
+        assert updated["sync_status"] == "pending"
         assert updated["external_id"] == "ext_999"
 
     def test_update_sync_state_not_found(self):
         result = update_sync_state("sync_nonexistent_999", sync_status="synced")
         assert result is None
+
+    def test_update_sync_state_cannot_bypass_state_machine_for_status(self):
+        _insert_test_task("task_ss_status_bypass")
+        record = create_sync_state(
+            task_id="task_ss_status_bypass",
+            sync_target="apple_calendar",
+        )
+
+        with pytest.raises(ValueError, match="transition_sync_state"):
+            update_sync_state(record["sync_id"], sync_status="synced")
+
+        assert get_sync_state(record["sync_id"])["sync_status"] == "pending"
+
+    def test_transition_sync_state_allows_legal_status_change(self):
+        _insert_test_task("task_ss_transition")
+        record = create_sync_state(
+            task_id="task_ss_transition",
+            sync_target="apple_calendar",
+        )
+
+        transitioned = transition_sync_state(
+            record["sync_id"],
+            "in_progress",
+            trigger="engine",
+        )
+
+        assert transitioned["sync_status"] == "in_progress"
+        assert transitioned["last_sync_trigger"] == "engine"
 
     def test_delete_sync_state(self):
         _insert_test_task("task_ss_10")

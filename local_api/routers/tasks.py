@@ -15,7 +15,11 @@ from ..database import get_db
 from ..models import TaskCreateRequest, TaskUpdateRequest, TaskResponse, TaskListResponse
 from ..config import MAX_LIMIT, DEFAULT_LIMIT, ALLOWED_PRIORITIES, ALLOWED_STATUSES
 from ..services.sync_eligibility import eligible_for_calendar_sync
-from ..services.sync_state_service import create_sync_state, get_sync_state_by_key, update_sync_state
+from ..services.sync_state_service import (
+    create_sync_state,
+    get_sync_state_by_key,
+    transition_sync_state,
+)
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 logger = logging.getLogger("local_api.tasks")
@@ -107,7 +111,7 @@ def _sync_calendar_state_after_task_update(before: dict, after: dict) -> None:
         and existing.get("external_id")
         and _sync_relevant_fields_changed(before, after)
     ):
-        update_sync_state(existing["sync_id"], sync_status="stale")
+        transition_sync_state(existing["sync_id"], "stale", trigger="trigger")
         return
 
     if existing is None or existing.get("sync_status") != "synced":
@@ -126,36 +130,40 @@ def create_task(request: Request, body: TaskCreateRequest):
 
     reminder_json = json.dumps(body.reminder_channels, ensure_ascii=False)
 
-    conn.execute(
-        """
-        INSERT INTO tasks (
-            task_id, title, description, priority, status,
-            start_time, due_time, timezone, location,
-            need_weather_check, reminder_channels, created_channel,
-            sync_enabled, sync_targets,
-            created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            task_id,
-            body.title.strip(),
-            body.description.strip() if body.description else None,
-            body.priority,
-            body.status,
-            body.start_time,
-            body.due_time,
-            body.timezone,
-            body.location.strip() if body.location else None,
-            1 if body.need_weather_check else 0,
-            reminder_json,
-            body.created_channel,
-            1 if body.sync_enabled else 0,
-            json.dumps(body.sync_targets, ensure_ascii=False),
-            now,
-            now,
-        ),
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            """
+            INSERT INTO tasks (
+                task_id, title, description, priority, status,
+                start_time, due_time, timezone, location,
+                need_weather_check, reminder_channels, created_channel,
+                sync_enabled, sync_targets,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                task_id,
+                body.title.strip(),
+                body.description.strip() if body.description else None,
+                body.priority,
+                body.status,
+                body.start_time,
+                body.due_time,
+                body.timezone,
+                body.location.strip() if body.location else None,
+                1 if body.need_weather_check else 0,
+                reminder_json,
+                body.created_channel,
+                1 if body.sync_enabled else 0,
+                json.dumps(body.sync_targets, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
     _ensure_pending_calendar_sync_state_if_eligible(_task_to_eligibility_dict(row))
@@ -269,11 +277,15 @@ def update_task(request: Request, task_id: str, body: TaskUpdateRequest):
     params.append(task_id)
 
     before_update = _task_to_eligibility_dict(row)
-    conn.execute(
-        f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = ?",
-        params,
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            f"UPDATE tasks SET {', '.join(updates)} WHERE task_id = ?",
+            params,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
     _sync_calendar_state_after_task_update(before_update, _task_to_eligibility_dict(row))
@@ -293,11 +305,15 @@ def complete_task(request: Request, task_id: str):
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
 
     now = _iso_now()
-    conn.execute(
-        "UPDATE tasks SET status = 'completed', updated_at = ? WHERE task_id = ?",
-        (now, task_id),
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            "UPDATE tasks SET status = 'completed', updated_at = ? WHERE task_id = ?",
+            (now, task_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
     logger.info("task_completed task_id=%s request_id=%s", task_id, getattr(request.state, "request_id", "?"))

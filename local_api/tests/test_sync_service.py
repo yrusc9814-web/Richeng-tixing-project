@@ -19,6 +19,7 @@ from local_api.services.sync_state_service import (
     create_sync_state,
     get_sync_state,
     get_sync_state_by_key,
+    transition_sync_state,
 )
 from local_api.services.sync_log_service import list_sync_logs
 
@@ -348,6 +349,47 @@ class TestRunTaskSyncGuardrails:
         assert adapter.push_count == 0
         state = get_sync_state(sync["sync_id"])
         assert state["sync_status"] == "skipped"
+
+    def test_skipped_state_is_not_illegally_pushed_to_in_progress(self):
+        _insert_task("task_guard_skipped", sync_enabled=1)
+        sync = create_sync_state(
+            "task_guard_skipped",
+            "apple_calendar",
+            sync_status="skipped",
+        )
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_guard_skipped", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "skipped"
+        assert result["error_code"] == "invalid_transition"
+        assert adapter.push_count == 0
+        assert get_sync_state(sync["sync_id"])["sync_status"] == "skipped"
+        assert _logs(sync["sync_id"]) == []
+
+    def test_skipped_state_can_be_revived_manually_before_sync(self):
+        _insert_task("task_guard_skipped_manual", sync_enabled=1)
+        sync = create_sync_state(
+            "task_guard_skipped_manual",
+            "apple_calendar",
+            sync_status="skipped",
+        )
+        transition_sync_state(sync["sync_id"], "pending", trigger="manual")
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_guard_skipped_manual", "apple_calendar")
+
+        assert result["success"] is True
+        assert result["sync_status"] == "synced"
+        assert adapter.push_count == 1
+        state = get_sync_state(sync["sync_id"])
+        assert state["sync_status"] == "synced"
+        logs = _logs(sync["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "success"
 
 
 # ── Tests: run_task_sync — error paths ────────────────────────────────

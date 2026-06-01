@@ -294,6 +294,25 @@ class SyncEngine:
             task_id = sync.get("task_id")
 
             try:
+                current = get_sync_state(sync_id)
+                if current is None:
+                    continue
+                if current["sync_status"] != "in_progress":
+                    create_sync_log(
+                        sync_id=sync_id,
+                        local_task_id=task_id,
+                        sync_target=sync_target,
+                        sync_attempt=self._max_attempt(sync_id) + 1,
+                        sync_result="skipped",
+                        error_code="invalid_transition",
+                        error_message=(
+                            "Adapter push requires in_progress state; "
+                            f"current state is {current['sync_status']}"
+                        ),
+                        triggered_by="sync_engine",
+                    )
+                    continue
+
                 # 1. Route to adapter
                 adapter = self._route_adapter(sync_target)
 

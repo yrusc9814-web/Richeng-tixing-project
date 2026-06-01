@@ -462,3 +462,37 @@ def test_stale_repush_preserves_existing_external_id_for_calendar_update():
     state = get_sync_state(sync["sync_id"])
     assert state["sync_status"] == "synced"
     assert state["external_id"] == "calendar_event_existing"
+
+
+def test_skipped_state_is_not_picked_or_pushed_by_scan():
+    sync = _sync("task_engine_skipped_scan", status="skipped")
+    engine = SyncEngine(adapters=_adapters())
+
+    result = engine.scan_once()
+
+    assert result.pending_picked == 0
+    assert get_sync_state(sync["sync_id"])["sync_status"] == "skipped"
+    assert _logs(sync["sync_id"]) == []
+
+
+def test_adapter_cycle_refuses_skipped_without_success_log():
+    class CountingCalendarAdapter(MockAppleAdapter):
+        def __init__(self):
+            self.push_count = 0
+
+        def push(self, task_data: dict, sync_state: dict):
+            self.push_count += 1
+            return super().push(task_data, sync_state)
+
+    sync = _sync("task_engine_skipped_direct", status="skipped")
+    adapter = CountingCalendarAdapter()
+    engine = SyncEngine(adapters=[adapter])
+
+    engine._adapter_push_cycle([sync])
+
+    assert adapter.push_count == 0
+    assert get_sync_state(sync["sync_id"])["sync_status"] == "skipped"
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["sync_result"] == "skipped"
+    assert logs[0]["error_code"] == "invalid_transition"

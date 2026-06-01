@@ -52,24 +52,28 @@ def create_sync_log(
     if sync is None:
         raise ValueError(f"Sync state not found: {sync_id}")
 
-    conn.execute(
-        """INSERT INTO sync_logs (
-            log_id, sync_id, local_task_id, sync_target, sync_attempt,
-            sync_result, error_code, error_message, drift_detected, drift_fields,
-            payload_hash_before, payload_hash_after,
-            external_id_before, external_id_after,
-            request_id, triggered_by, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            log_id, sync_id, local_task_id, sync_target, sync_attempt,
-            sync_result, error_code, redacted_error_message,
-            1 if drift_detected else 0, drift_fields,
-            payload_hash_before, payload_hash_after,
-            external_id_before, external_id_after,
-            request_id, triggered_by, now,
-        ),
-    )
-    conn.commit()
+    try:
+        conn.execute(
+            """INSERT INTO sync_logs (
+                log_id, sync_id, local_task_id, sync_target, sync_attempt,
+                sync_result, error_code, error_message, drift_detected, drift_fields,
+                payload_hash_before, payload_hash_after,
+                external_id_before, external_id_after,
+                request_id, triggered_by, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                log_id, sync_id, local_task_id, sync_target, sync_attempt,
+                sync_result, error_code, redacted_error_message,
+                1 if drift_detected else 0, drift_fields,
+                payload_hash_before, payload_hash_after,
+                external_id_before, external_id_after,
+                request_id, triggered_by, now,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
     row = conn.execute(
         "SELECT * FROM sync_logs WHERE log_id = ?", (log_id,)
@@ -130,6 +134,10 @@ def list_sync_logs(
 def delete_logs_by_sync_id(sync_id: str) -> int:
     """Delete all sync_log records for a given sync_id. Returns count deleted."""
     conn = get_db()
-    cursor = conn.execute("DELETE FROM sync_logs WHERE sync_id = ?", (sync_id,))
-    conn.commit()
+    try:
+        cursor = conn.execute("DELETE FROM sync_logs WHERE sync_id = ?", (sync_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return cursor.rowcount

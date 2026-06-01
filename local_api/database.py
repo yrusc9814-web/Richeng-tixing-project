@@ -112,12 +112,18 @@ def get_db() -> sqlite3.Connection:
     if conn is None:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+        conn.execute("PRAGMA busy_timeout=5000")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
-        conn.executescript(SCHEMA_SQL)
-        _run_migrations(conn)
-        conn.commit()
+        try:
+            conn.executescript(SCHEMA_SQL)
+            _run_migrations(conn)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            conn.close()
+            raise
         _local.conn = conn
     return conn
 
@@ -125,9 +131,13 @@ def get_db() -> sqlite3.Connection:
 def init_db() -> None:
     """Ensure the database and schema exist. Idempotent — safe to call multiple times."""
     conn = get_db()
-    conn.executescript(SCHEMA_SQL)
-    _run_migrations(conn)
-    conn.commit()
+    try:
+        conn.executescript(SCHEMA_SQL)
+        _run_migrations(conn)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def close_db() -> None:
@@ -141,9 +151,13 @@ def close_db() -> None:
 def reset_db() -> None:
     """Drop and recreate all tables — ONLY for test/dev use."""
     conn = get_db()
-    conn.execute("DROP TABLE IF EXISTS sync_logs")
-    conn.execute("DROP TABLE IF EXISTS sync_state")
-    conn.execute("DROP TABLE IF EXISTS tasks")
-    conn.executescript(SCHEMA_SQL)
-    _run_migrations(conn)
-    conn.commit()
+    try:
+        conn.execute("DROP TABLE IF EXISTS sync_logs")
+        conn.execute("DROP TABLE IF EXISTS sync_state")
+        conn.execute("DROP TABLE IF EXISTS tasks")
+        conn.executescript(SCHEMA_SQL)
+        _run_migrations(conn)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise

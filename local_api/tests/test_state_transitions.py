@@ -100,6 +100,7 @@ def test_idempotent_paths(status):
     [
         ("deleted", "pending", "manual"),
         ("deleted", "disabled", "manual"),
+        ("deleted", "synced", "manual"),
         ("pending", "synced", "engine"),
         ("pending", "failed", "engine"),
         ("in_progress", "pending", "manual"),

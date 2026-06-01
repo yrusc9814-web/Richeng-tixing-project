@@ -16,6 +16,7 @@ from ..services.sync_state_service import (
     get_sync_state,
     get_sync_state_by_key,
     list_sync_states,
+    transition_sync_state,
     update_sync_state,
     delete_sync_state,
 )
@@ -126,8 +127,27 @@ def update_sync_state_endpoint(
 ):
     """Update a sync state record."""
     update_kwargs = body.model_dump(exclude_unset=True)
+    requested_status = update_kwargs.pop("sync_status", None)
+    transition_trigger = update_kwargs.pop("last_sync_trigger", None)
+
     try:
-        record = update_sync_state(sync_id, **update_kwargs)
+        if requested_status is not None:
+            record = transition_sync_state(
+                sync_id,
+                requested_status,
+                trigger=transition_trigger or "manual",
+            )
+            if record is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Sync state not found: {sync_id}",
+                )
+            if update_kwargs:
+                record = update_sync_state(sync_id, **update_kwargs)
+        else:
+            if transition_trigger is not None:
+                update_kwargs["last_sync_trigger"] = transition_trigger
+            record = update_sync_state(sync_id, **update_kwargs)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 

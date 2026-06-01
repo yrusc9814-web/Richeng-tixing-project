@@ -243,7 +243,7 @@ class TestListSyncStates:
 class TestUpdateSyncState:
     """PATCH /api/sync/state/{sync_id}"""
 
-    def test_update_status(self):
+    def test_update_non_status_fields(self):
         task_id = _create_task()
         create_resp = client.post(
             "/api/sync/state",
@@ -253,13 +253,68 @@ class TestUpdateSyncState:
         sync_id = create_resp.json()["sync_id"]
         resp = client.patch(
             f"/api/sync/state/{sync_id}",
-            json={"sync_status": "synced", "external_id": "ext_002"},
+            json={"external_id": "ext_002", "last_synced_at": "2026-06-01T10:00:00+08:00"},
             headers=AUTH_HEADER,
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert data["sync_status"] == "synced"
+        assert data["sync_status"] == "pending"
         assert data["external_id"] == "ext_002"
+        assert data["last_synced_at"] == "2026-06-01T10:00:00+08:00"
+
+    def test_update_status_rejects_illegal_transition(self):
+        task_id = _create_task()
+        create_resp = client.post(
+            "/api/sync/state",
+            json={"task_id": task_id, "sync_target": "apple_calendar"},
+            headers=AUTH_HEADER,
+        )
+        sync_id = create_resp.json()["sync_id"]
+        resp = client.patch(
+            f"/api/sync/state/{sync_id}",
+            json={"sync_status": "synced"},
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 422
+        assert "Cannot transition" in resp.json()["detail"]
+
+    def test_update_status_allows_legal_manual_transition(self):
+        task_id = _create_task()
+        create_resp = client.post(
+            "/api/sync/state",
+            json={"task_id": task_id, "sync_target": "apple_calendar"},
+            headers=AUTH_HEADER,
+        )
+        sync_id = create_resp.json()["sync_id"]
+        resp = client.patch(
+            f"/api/sync/state/{sync_id}",
+            json={"sync_status": "skipped"},
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["sync_status"] == "skipped"
+        assert data["last_sync_trigger"] == "manual"
+
+    def test_deleted_to_synced_is_rejected(self):
+        task_id = _create_task()
+        create_resp = client.post(
+            "/api/sync/state",
+            json={
+                "task_id": task_id,
+                "sync_target": "apple_calendar",
+                "sync_status": "deleted",
+            },
+            headers=AUTH_HEADER,
+        )
+        sync_id = create_resp.json()["sync_id"]
+        resp = client.patch(
+            f"/api/sync/state/{sync_id}",
+            json={"sync_status": "synced"},
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 422
+        assert "Cannot transition from 'deleted' to 'synced'" in resp.json()["detail"]
 
     def test_update_nonexistent(self):
         resp = client.patch(
