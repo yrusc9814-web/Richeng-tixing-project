@@ -20,6 +20,7 @@ from ..services.sync_state_service import (
     get_sync_state_by_key,
     transition_sync_state,
 )
+from ..adapters.apple_adapter import AppleSyncAdapter
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 logger = logging.getLogger("local_api.tasks")
@@ -116,6 +117,64 @@ def _sync_calendar_state_after_task_update(before: dict, after: dict) -> None:
 
     if existing is None or existing.get("sync_status") != "synced":
         _ensure_pending_calendar_sync_state_if_eligible(after)
+
+
+_TERMINAL_CLEANUP_SKIP_STATUSES = frozenset({"deleted", "disabled", "orphaned"})
+
+
+def _cleanup_calendar_on_terminal(task_id: str) -> None:
+    """Remove apple_calendar event for a task entering a terminal status.
+
+    Called after complete_task() or update_task() when status becomes
+    completed or cancelled.  Idempotent — safe to call multiple times.
+
+    Never blocks the caller (logs and returns on any failure).
+    """
+    sync_state = get_sync_state_by_key(task_id, _CALENDAR_SYNC_TARGET)
+    if sync_state is None:
+        return
+    external_id = sync_state.get("external_id")
+    if not external_id:
+        logger.info(
+            "calendar_terminal_cleanup_skip task_id=%s reason=no_external_id",
+            task_id,
+        )
+        return
+    status = sync_state.get("sync_status", "")
+    if status in _TERMINAL_CLEANUP_SKIP_STATUSES:
+        logger.info(
+            "calendar_terminal_cleanup_skip task_id=%s reason=already_%s",
+            task_id, status,
+        )
+        return
+
+    try:
+        adapter = AppleSyncAdapter(target=_CALENDAR_SYNC_TARGET)
+        removed = adapter.remove_event(external_id)
+    except Exception as exc:
+        logger.warning(
+            "calendar_terminal_cleanup_exception task_id=%s error=%s",
+            task_id, exc,
+        )
+        return
+
+    if removed:
+        try:
+            transition_sync_state(sync_state["sync_id"], "disabled", trigger="manual")
+            logger.info(
+                "calendar_terminal_cleanup_ok task_id=%s sync_id=%s",
+                task_id, sync_state["sync_id"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "calendar_terminal_cleanup_transition_failed task_id=%s error=%s",
+                task_id, exc,
+            )
+    else:
+        logger.warning(
+            "calendar_terminal_cleanup_failed task_id=%s external_id=%s",
+            task_id, external_id,
+        )
 
 
 # ── POST /api/tasks ────────────────────────────────────────────────────────
@@ -289,6 +348,9 @@ def update_task(request: Request, task_id: str, body: TaskUpdateRequest):
 
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
     _sync_calendar_state_after_task_update(before_update, _task_to_eligibility_dict(row))
+    after_status = row["status"] if row else None
+    if after_status == "cancelled":
+        _cleanup_calendar_on_terminal(task_id)
     logger.info("task_updated task_id=%s request_id=%s", task_id, getattr(request.state, "request_id", "?"))
     return _row_to_response(row)
 
@@ -316,5 +378,6 @@ def complete_task(request: Request, task_id: str):
         raise
 
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+    _cleanup_calendar_on_terminal(task_id)
     logger.info("task_completed task_id=%s request_id=%s", task_id, getattr(request.state, "request_id", "?"))
     return _row_to_response(row)
