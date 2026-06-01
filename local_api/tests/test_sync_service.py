@@ -20,6 +20,7 @@ from local_api.services.sync_state_service import (
     get_sync_state,
     get_sync_state_by_key,
     transition_sync_state,
+    update_sync_state,
 )
 from local_api.services.sync_log_service import list_sync_logs
 
@@ -550,3 +551,50 @@ class TestAddAdapter:
         svc.add_adapter(MockSuccessAdapter())
         svc.add_adapter(MockFailAdapter())
         assert len(svc._adapters) == 2
+
+
+# ── Tests: skipped consistency ────────────────────────────────────────
+
+
+@pytest.mark.usefixtures("clean_db")
+class TestSkippedConsistency:
+    """skipped state cannot be illegally advanced; already-synced records are idempotent."""
+
+    def test_already_synced_returns_skipped_without_log(self):
+        """run_task_sync with synced + external_id must NOT write a sync_log."""
+        _insert_task("task_skip_001", sync_enabled=1)
+        state = create_sync_state("task_skip_001", "apple_calendar", sync_status="synced")
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_already_done",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+        result = svc.run_task_sync("task_skip_001", "apple_calendar")
+
+        # Returns success=True (idempotent) with status=skipped
+        assert result["success"] is True
+        assert result["sync_status"] == "skipped"
+        assert result["error_code"] == "already_synced"
+
+        # Must NOT have written a sync_log
+        logs, total = list_sync_logs(sync_id=state["sync_id"])
+        assert total == 0, "Already-synced records must not produce sync_logs"
+
+    def test_already_synced_does_not_change_state(self):
+        """run_task_sync on an already synced record must keep status synced."""
+        _insert_task("task_skip_002", sync_enabled=1)
+        state = create_sync_state("task_skip_002", "apple_calendar", sync_status="synced")
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_no_touch",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+        svc.run_task_sync("task_skip_002", "apple_calendar")
+
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "synced"
+        assert persisted["external_id"] == "ext_no_touch"

@@ -38,6 +38,18 @@ def test_sqlite_connection_sets_busy_timeout():
     assert timeout == 5000
 
 
+def test_sqlite_connection_sets_wal_mode():
+    mode = get_db().execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert mode == "wal"
+
+
+def test_sqlite_connection_sets_foreign_keys():
+    fk = get_db().execute("PRAGMA foreign_keys").fetchone()[0]
+
+    assert fk == 1
+
+
 def test_update_write_exception_rolls_back(monkeypatch):
     class FakeCursor:
         def fetchone(self):
@@ -93,3 +105,31 @@ def test_failed_transition_write_keeps_original_state():
     assert persisted["sync_status"] == "pending"
     assert persisted["started_at"] is None
     assert persisted["locked_at"] is None
+
+
+def test_update_sync_state_rejects_sync_status():
+    """update_sync_state must raise ValueError when sync_status is provided."""
+    _insert_task()
+    state = create_sync_state("task_db_resilience", "apple_calendar")
+
+    with pytest.raises(ValueError, match="sync_status updates must use transition_sync_state"):
+        sync_state_service.update_sync_state(
+            state["sync_id"],
+            sync_status="synced",
+        )
+
+
+def test_update_sync_state_allows_non_status_fields():
+    """update_sync_state must allow external_id / last_synced_at updates."""
+    _insert_task()
+    state = create_sync_state("task_db_resilience", "apple_calendar")
+
+    updated = sync_state_service.update_sync_state(
+        state["sync_id"],
+        external_id="ext_abc",
+        last_synced_at="2026-06-01T00:00:00",
+    )
+
+    assert updated is not None
+    assert updated["external_id"] == "ext_abc"
+    assert updated["sync_status"] == "pending"
