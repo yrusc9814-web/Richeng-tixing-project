@@ -1156,3 +1156,220 @@ class TestMetadataWriteFailure:
         assert state["sync_status"] == "synced"
         assert state["payload_hash"] is not None
         assert state["external_id"] is not None
+
+
+# ── Phase 27 — Direct sync pre-push failure consistency ────────────────
+
+
+class TestDirectSyncPrePushFailureConsistency:
+    """adapter_not_found / adapter_config_invalid before push must:
+    - use existing sync_state (not create new state)
+    - write sync_log with triggered_by='sync_service'
+    - transition to failed_permanent when legal
+    - use max(sync_attempt)+1 attempt semantics
+    - preserve current failure return when no sync_state exists
+    """
+
+    def test_existing_pending_state_missing_adapter_goes_failed_permanent(self):
+        """Direct sync with existing pending state + missing adapter:
+        state enters failed_permanent + adapter_not_found log."""
+        _insert_task("task_p27_no_adapter", sync_enabled=1)
+        state = create_sync_state("task_p27_no_adapter", "apple_calendar")
+        assert state["sync_status"] == "pending"
+
+        svc = SyncService()  # no adapters registered
+        result = svc.run_task_sync("task_p27_no_adapter", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_id"] == state["sync_id"]
+        assert result["error_code"] == "adapter_not_found"
+        assert result["sync_status"] == "failed_permanent"
+
+        # DB state must be failed_permanent
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "failed_permanent"
+
+        # adapter_not_found log must exist with triggered_by=sync_service
+        logs = _logs(state["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "adapter_not_found"
+        assert logs[0]["triggered_by"] == "sync_service"
+
+    def test_existing_pending_state_adapter_config_invalid_goes_failed_permanent(self):
+        """Direct sync with existing pending state + adapter config invalid:
+        state enters failed_permanent + adapter_config_invalid log."""
+        _insert_task("task_p27_config_invalid", sync_enabled=1)
+        state = create_sync_state("task_p27_config_invalid", "apple_calendar")
+        assert state["sync_status"] == "pending"
+
+        svc = SyncService(adapters=[MockAdapterConfigInvalid()])
+        result = svc.run_task_sync("task_p27_config_invalid", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_id"] == state["sync_id"]
+        assert result["error_code"] == "adapter_config_invalid"
+        assert result["sync_status"] == "failed_permanent"
+
+        # DB state must be failed_permanent
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "failed_permanent"
+
+        # adapter_config_invalid log must exist with triggered_by=sync_service
+        logs = _logs(state["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "adapter_config_invalid"
+        assert logs[0]["triggered_by"] == "sync_service"
+
+    def test_pending_adapter_not_found_log_attempt_uses_max_plus_one(self):
+        """direct sync adapter_not_found with existing logs must use
+        max(sync_attempt)+1, matching queued sync semantics."""
+        _insert_task("task_p27_attempt_max", sync_enabled=1)
+        state = create_sync_state("task_p27_attempt_max", "apple_calendar")
+        # Pre-create a log with sync_attempt=2
+        create_sync_log(
+            sync_id=state["sync_id"],
+            local_task_id=state["task_id"],
+            sync_target=state["sync_target"],
+            sync_attempt=2,
+            sync_result="failed",
+            error_code="previous_failure",
+            triggered_by="test",
+        )
+
+        svc = SyncService()  # no adapters
+        result = svc.run_task_sync("task_p27_attempt_max", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["error_code"] == "adapter_not_found"
+        logs = _logs(state["sync_id"])
+        # New log must use max(2) + 1 = 3
+        assert [log["sync_attempt"] for log in logs] == [3, 2]
+        assert logs[0]["error_code"] == "adapter_not_found"
+
+    def test_pending_config_invalid_log_attempt_uses_max_plus_one(self):
+        """direct sync adapter_config_invalid with existing logs must use
+        max(sync_attempt)+1, matching queued sync semantics."""
+        _insert_task("task_p27_config_attempt", sync_enabled=1)
+        state = create_sync_state("task_p27_config_attempt", "apple_calendar")
+        create_sync_log(
+            sync_id=state["sync_id"],
+            local_task_id=state["task_id"],
+            sync_target=state["sync_target"],
+            sync_attempt=3,
+            sync_result="failed",
+            error_code="previous_failure",
+            triggered_by="test",
+        )
+
+        svc = SyncService(adapters=[MockAdapterConfigInvalid()])
+        result = svc.run_task_sync("task_p27_config_attempt", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["error_code"] == "adapter_config_invalid"
+        logs = _logs(state["sync_id"])
+        assert [log["sync_attempt"] for log in logs] == [4, 3]
+        assert logs[0]["error_code"] == "adapter_config_invalid"
+
+    def test_no_existing_state_missing_adapter_creates_nothing(self):
+        """Direct sync with no sync_state + missing adapter:
+        creates no new state, writes no log, returns error without sync_id."""
+        _insert_task("task_p27_no_state", sync_enabled=1)
+
+        svc = SyncService()  # no adapters
+        result = svc.run_task_sync("task_p27_no_state", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_id"] is None
+        assert result["error_code"] == "adapter_not_found"
+
+        # Must not create sync_state
+        assert get_sync_state_by_key("task_p27_no_state", "apple_calendar") is None
+
+        # Must not write any sync_log
+        all_logs, total = list_sync_logs(limit=1000)
+        assert total == 0
+
+    def test_no_existing_state_config_invalid_creates_nothing(self):
+        """Direct sync with no sync_state + adapter config invalid:
+        creates no new state, writes no log, returns error without sync_id."""
+        _insert_task("task_p27_no_state_config", sync_enabled=1)
+
+        svc = SyncService(adapters=[MockAdapterConfigInvalid()])
+        result = svc.run_task_sync("task_p27_no_state_config", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_id"] is None
+        assert result["error_code"] == "adapter_config_invalid"
+
+        # Must not create sync_state
+        assert get_sync_state_by_key("task_p27_no_state_config", "apple_calendar") is None
+
+        # Must not write any sync_log
+        all_logs, total = list_sync_logs(limit=1000)
+        assert total == 0
+
+    def test_apple_reminder_does_not_create_calendar_state_or_log(self):
+        """apple_reminder must not route to Calendar adapter and must not
+        create any Calendar sync_state or sync_log."""
+        _insert_task(
+            "task_p27_reminder",
+            sync_enabled=1,
+            sync_targets='["apple_reminder"]',
+        )
+
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+        result = svc.run_task_sync("task_p27_reminder", "apple_reminder")
+
+        # Must return unsupported_target, never reach adapter routing
+        assert result["success"] is False
+        assert result["error_code"] == "unsupported_target"
+        assert adapter.push_count == 0
+
+        # Must not create any Calendar state
+        assert get_sync_state_by_key("task_p27_reminder", "apple_calendar") is None
+        # Must not create any Reminder state either
+        assert get_sync_state_by_key("task_p27_reminder", "apple_reminder") is None
+
+        # Must not write any sync_log
+        all_logs, total = list_sync_logs(limit=1000)
+        assert total == 0
+
+    def test_adapter_not_found_mid_transition_uses_fresh_db_read(self, monkeypatch):
+        """When _transition_to_failed_permanent makes intermediate legal
+        transitions then returns None, the result must reflect the persisted
+        DB status, not the stale originally-loaded sync_state snapshot."""
+        _insert_task("task_mid_trans", sync_enabled=1)
+        state = create_sync_state("task_mid_trans", "apple_calendar")
+        assert state["sync_status"] == "pending"
+
+        # Mock _transition_to_failed_permanent to simulate an intermediate
+        # transition (pending → in_progress succeeds) followed by a later
+        # failure (the second step returns None).
+        from local_api.services import sync_service as svc_mod
+
+        def _mock_ttpf_mid_transition(sync_id: str):
+            transition_sync_state(sync_id, "in_progress", trigger="engine")
+            return None
+
+        monkeypatch.setattr(
+            svc_mod, "_transition_to_failed_permanent", _mock_ttpf_mid_transition
+        )
+
+        svc = SyncService()  # no adapters → adapter_not_found branch
+        result = svc.run_task_sync("task_mid_trans", "apple_calendar")
+
+        # Without the fix, result["sync_status"] would be "pending"
+        # (the stale originally-loaded snapshot).  With the fix it must
+        # reflect the true DB state ("in_progress").
+        assert result["success"] is False
+        assert result["sync_status"] == "in_progress", (
+            f"Expected persisted DB status 'in_progress', got {result['sync_status']}"
+        )
+        assert result["error_code"] == "adapter_not_found"
+
+        # Verify DB actually shows in_progress
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "in_progress"

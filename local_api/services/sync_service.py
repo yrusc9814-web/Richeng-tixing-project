@@ -92,30 +92,10 @@ class SyncService:
                 message="Only apple_calendar sync is allowed",
             )
 
-        # 1. Route to adapter
-        adapter = self._route_adapter(sync_target)
-        if adapter is None:
-            return _error_result(
-                sync_id=None,
-                status="failed_permanent",
-                code="adapter_not_found",
-                message=f"No adapter configured for sync_target: {sync_target}",
-            )
-
-        # 2. Validate adapter config
-        valid, err_msg = adapter.validate_config()
-        if not valid:
-            return _error_result(
-                sync_id=None,
-                status="failed_permanent",
-                code="adapter_config_invalid",
-                message=err_msg or "Adapter config validation failed",
-            )
-
-        # 3. Look up existing sync_state before fetching task data. This keeps
-        # task-not-found errors tied to the existing record when a task was
-        # deleted after state creation, while still avoiding new state creation
-        # for never-seen tasks.
+        # 1. Look up existing sync_state before adapter routing. This keeps
+        # adapter-not-found and adapter-config-invalid errors tied to the
+        # existing record when state exists, while still avoiding new state
+        # creation for never-seen tasks.
         try:
             existing = get_sync_state_by_key(task_id, sync_target)
             if existing:
@@ -131,6 +111,72 @@ class SyncService:
                 code="state_lookup_failed",
                 message=str(e),
             )
+
+        # 2. Route to adapter
+        adapter = self._route_adapter(sync_target)
+        if adapter is None:
+            if sync_id is not None:
+                # Existing sync_state: transition + log
+                transitioned = _transition_to_failed_permanent(sync_id)
+                if transitioned is not None:
+                    result_status = "failed_permanent"
+                else:
+                    # Illegal transition — preserve real DB state
+                    current = get_sync_state_by_key(task_id, sync_target)
+                    result_status = current.get("sync_status") if current else "failed_permanent"
+                _log_failure(
+                    sync_id, task_id, sync_target,
+                    attempt=self._next_sync_attempt(sync_id),
+                    code="adapter_not_found",
+                    message=f"No adapter configured for sync_target: {sync_target}",
+                )
+                return _error_result(
+                    sync_id=sync_id,
+                    status=result_status,
+                    code="adapter_not_found",
+                    message=f"No adapter configured for sync_target: {sync_target}",
+                )
+            else:
+                # No existing sync_state: preserve current failure return semantics
+                return _error_result(
+                    sync_id=None,
+                    status="failed_permanent",
+                    code="adapter_not_found",
+                    message=f"No adapter configured for sync_target: {sync_target}",
+                )
+
+        # 3. Validate adapter config
+        valid, err_msg = adapter.validate_config()
+        if not valid:
+            if sync_id is not None:
+                # Existing sync_state: transition + log
+                transitioned = _transition_to_failed_permanent(sync_id)
+                if transitioned is not None:
+                    result_status = "failed_permanent"
+                else:
+                    # Illegal transition — preserve real DB state
+                    current = get_sync_state_by_key(task_id, sync_target)
+                    result_status = current.get("sync_status") if current else "failed_permanent"
+                _log_failure(
+                    sync_id, task_id, sync_target,
+                    attempt=self._next_sync_attempt(sync_id),
+                    code="adapter_config_invalid",
+                    message=err_msg or "Adapter config validation failed",
+                )
+                return _error_result(
+                    sync_id=sync_id,
+                    status=result_status,
+                    code="adapter_config_invalid",
+                    message=err_msg or "Adapter config validation failed",
+                )
+            else:
+                # No existing sync_state: preserve current failure return semantics
+                return _error_result(
+                    sync_id=None,
+                    status="failed_permanent",
+                    code="adapter_config_invalid",
+                    message=err_msg or "Adapter config validation failed",
+                )
 
         # 4. Fetch task data before creating sync_state; eligibility failures
         # must not enqueue new records.
@@ -407,6 +453,39 @@ def _safe_transition(
             "Could not transition %s to %s: %s", sync_id, to_status, exc,
         )
         return None, exc
+
+
+def _transition_to_failed_permanent(sync_id: str) -> Optional[dict]:
+    """Transition to failed_permanent via the shortest legal engine path.
+
+    Direct pending→failed_permanent is illegal under the engine trigger,
+    so this helper walks the legal multi-step path:
+      - in_progress / failed  →  failed_permanent  (direct, one step)
+      - pending  →  in_progress  →  failed_permanent
+      - stale    →  pending  →  in_progress  →  failed_permanent
+
+    Returns the final state dict on success, or None if unreachable.
+    """
+    # Path 1: direct (works for in_progress, failed, or idempotent)
+    result, _ = _safe_transition(sync_id, "failed_permanent", trigger="engine")
+    if result is not None:
+        return result
+
+    # Path 2: pending → in_progress → failed_permanent
+    result, _ = _safe_transition(sync_id, "in_progress", trigger="engine")
+    if result is not None:
+        result2, _ = _safe_transition(sync_id, "failed_permanent", trigger="engine")
+        return result2
+
+    # Path 3: stale → pending → in_progress → failed_permanent
+    result, _ = _safe_transition(sync_id, "pending", trigger="engine")
+    if result is not None:
+        result2, _ = _safe_transition(sync_id, "in_progress", trigger="engine")
+        if result2 is not None:
+            result3, _ = _safe_transition(sync_id, "failed_permanent", trigger="engine")
+            return result3
+
+    return None
 
 
 def _log_sync(
