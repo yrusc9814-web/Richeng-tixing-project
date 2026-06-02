@@ -22,7 +22,7 @@ from local_api.services.sync_state_service import (
     transition_sync_state,
     update_sync_state,
 )
-from local_api.services.sync_log_service import list_sync_logs
+from local_api.services.sync_log_service import create_sync_log, list_sync_logs
 
 
 # ── Mock adapters ─────────────────────────────────────────────────────
@@ -519,6 +519,38 @@ class TestEligibilityFailureStaleFailed:
         assert len(logs) == 1
         assert logs[0]["sync_result"] == "failed"
         assert logs[0]["error_code"] == "missing_time"
+        assert logs[0]["sync_attempt"] == 1
+
+    def test_pending_eligibility_failure_log_attempt_uses_max_plus_one(self):
+        """pending eligibility failures must not restart sync_attempt at 1."""
+        _insert_task(
+            "task_pending_elig_attempt",
+            sync_enabled=1,
+            start_time=None,
+            due_time=None,
+        )
+        state = create_sync_state("task_pending_elig_attempt", "apple_calendar")
+        create_sync_log(
+            sync_id=state["sync_id"],
+            local_task_id=state["task_id"],
+            sync_target=state["sync_target"],
+            sync_attempt=2,
+            sync_result="failed",
+            error_code="previous_failure",
+            triggered_by="test",
+        )
+
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_pending_elig_attempt", "apple_calendar")
+
+        assert adapter.push_count == 0
+        assert result["success"] is False
+        assert result["sync_status"] == "skipped"
+        logs = _logs(state["sync_id"])
+        assert [log["sync_attempt"] for log in logs] == [3, 2]
+        assert logs[0]["error_code"] == "missing_time"
 
 
 # ── Tests: run_task_sync — error paths ────────────────────────────────
@@ -581,6 +613,32 @@ class TestRunTaskSyncError:
         logs = _logs(result["sync_id"])
         assert len(logs) == 1
         assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "network"
+        assert logs[0]["sync_attempt"] == 1
+
+    def test_retryable_failure_log_attempt_uses_max_plus_one(self):
+        """direct retryable failures should share queued max+1 attempt semantics."""
+        _insert_task("task_svc_retry_attempt", sync_enabled=1)
+        state = create_sync_state("task_svc_retry_attempt", "apple_calendar")
+        transition_sync_state(state["sync_id"], "in_progress", trigger="engine")
+        transition_sync_state(state["sync_id"], "failed", trigger="engine")
+        create_sync_log(
+            sync_id=state["sync_id"],
+            local_task_id=state["task_id"],
+            sync_target=state["sync_target"],
+            sync_attempt=2,
+            sync_result="failed",
+            error_code="previous_failure",
+            triggered_by="test",
+        )
+        svc = SyncService(adapters=[MockFailAdapter()])
+
+        result = svc.run_task_sync("task_svc_retry_attempt", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "failed"
+        logs = _logs(state["sync_id"])
+        assert [log["sync_attempt"] for log in logs] == [3, 2]
         assert logs[0]["error_code"] == "network"
 
     def test_permanent_failure_returns_failed_permanent(self):
@@ -661,6 +719,49 @@ class TestRunTaskSyncError:
         assert result["success"] is False
         assert result["sync_status"] == "failed"
         assert result["error_code"] == "adapter_exception"
+        logs = _logs(result["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["error_code"] == "adapter_exception"
+        assert logs[0]["sync_attempt"] == 1
+
+    def test_adapter_exception_log_attempt_uses_max_plus_one(self):
+        """direct adapter exceptions should share queued max+1 attempt semantics."""
+        _insert_task("task_svc_exc_attempt", sync_enabled=1)
+        state = create_sync_state("task_svc_exc_attempt", "apple_calendar")
+        transition_sync_state(state["sync_id"], "in_progress", trigger="engine")
+        transition_sync_state(state["sync_id"], "failed", trigger="engine")
+        create_sync_log(
+            sync_id=state["sync_id"],
+            local_task_id=state["task_id"],
+            sync_target=state["sync_target"],
+            sync_attempt=3,
+            sync_result="failed",
+            error_code="previous_failure",
+            triggered_by="test",
+        )
+
+        class CrashingAdapter(SyncAdapter):
+            @property
+            def target_name(self) -> str:
+                return "apple_calendar"
+
+            def validate_config(self) -> tuple[bool, Optional[str]]:
+                return (True, None)
+
+            def push(self, task_data: dict, sync_state: dict) -> AdapterResult:
+                raise RuntimeError("Adapter crashed again!")
+
+            def pull(self, external_id: str) -> Optional[dict]:
+                return None
+
+        svc = SyncService(adapters=[CrashingAdapter()])
+        result = svc.run_task_sync("task_svc_exc_attempt", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "failed"
+        logs = _logs(state["sync_id"])
+        assert [log["sync_attempt"] for log in logs] == [4, 3]
+        assert logs[0]["error_code"] == "adapter_exception"
 
 
 # ── Tests: add_adapter ────────────────────────────────────────────────

@@ -181,7 +181,7 @@ class SyncService:
                     result_status = sync_state.get("sync_status", "skipped")
                 _log_failure(
                     sync_id, task_id, sync_target,
-                    attempt=1,
+                    attempt=self._next_sync_attempt(sync_id),
                     code=eligibility.reason,
                     message=f"Calendar sync eligibility failed: {eligibility.reason}",
                 )
@@ -249,6 +249,7 @@ class SyncService:
             )
 
         # 8. Execute push
+        attempt = self._next_sync_attempt(sync_id)
         try:
             push_result: AdapterResult = adapter.push(task_data, sync_state)
         except Exception as exc:
@@ -256,7 +257,7 @@ class SyncService:
             _safe_transition(sync_id, "failed", trigger="engine")
             _log_failure(
                 sync_id, task_id, sync_target,
-                attempt=1, code="adapter_exception", message=str(exc),
+                attempt=attempt, code="adapter_exception", message=str(exc),
             )
             return _error_result(
                 sync_id=sync_id,
@@ -294,7 +295,7 @@ class SyncService:
                     sync_id,
                     task_id,
                     sync_target,
-                    attempt=push_result.sync_attempt,
+                    attempt=attempt,
                     code="metadata_write_failed",
                     message=str(metadata_exc),
                 )
@@ -313,7 +314,7 @@ class SyncService:
                     sync_id,
                     task_id,
                     sync_target,
-                    attempt=push_result.sync_attempt,
+                    attempt=attempt,
                     code="invalid_transition",
                     message=str(transition_error),
                 )
@@ -329,7 +330,7 @@ class SyncService:
                 sync_id,
                 task_id,
                 sync_target,
-                push_result.sync_attempt,
+                attempt,
                 payload_hash_before=payload_hash_before,
                 payload_hash_after=payload_hash_after,
                 external_id_before=external_id_before,
@@ -349,7 +350,7 @@ class SyncService:
             _safe_transition(sync_id, target, trigger="engine")
             _log_failure(
                 sync_id, task_id, sync_target,
-                attempt=push_result.sync_attempt,
+                attempt=attempt,
                 code=push_result.error_code or "push_failed",
                 message=push_result.error_message or "Push failed",
             )
@@ -360,6 +361,17 @@ class SyncService:
                 message=push_result.error_message,
                 external_id=push_result.external_id,
             )
+
+    def _next_sync_attempt(self, sync_id: str) -> int:
+        """Return the next monotonic sync_attempt for an existing sync_state."""
+        conn = get_db()
+        row = conn.execute(
+            """SELECT COALESCE(MAX(sync_attempt), 0) AS max_attempt
+               FROM sync_logs
+               WHERE sync_id = ?""",
+            (sync_id,),
+        ).fetchone()
+        return int(row["max_attempt"]) + 1
 
 
 # ── Internal helpers ──────────────────────────────────────────────────

@@ -639,6 +639,46 @@ def test_stale_update_failure_does_not_mark_synced():
     assert len(logs) == 1
     assert logs[0]["sync_result"] == "failed"
     assert logs[0]["error_code"] == "network"
+    assert logs[0]["sync_attempt"] == 1
+
+
+def test_stale_update_failure_uses_max_plus_one_attempt():
+    """queued stale→pending→push failure should log max(sync_attempt)+1."""
+
+    class FailingUpdateAdapter(MockAppleAdapter):
+        def push(self, task_data: dict, sync_state: dict):
+            return AdapterResult(
+                success=False,
+                error_code="network",
+                error_message="Simulated network error",
+                sync_result="failed",
+            )
+
+    sync = _sync("task_engine_stale_fail_attempt", status="synced")
+    update_sync_state(sync["sync_id"], external_id="calendar_event_fail_attempt")
+    transition_sync_state(sync["sync_id"], "stale", trigger="trigger")
+    create_sync_log(
+        sync_id=sync["sync_id"],
+        local_task_id=sync["task_id"],
+        sync_target=sync["sync_target"],
+        sync_attempt=2,
+        sync_result="failed",
+        error_code="previous_failure",
+        triggered_by="test",
+    )
+    engine = SyncEngine(adapters=[FailingUpdateAdapter()])
+
+    stale_result = engine.scan_once()
+    push_result = engine.scan_once()
+
+    assert stale_result.stale_triggered == 1
+    assert push_result.pending_picked == 1
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "failed"
+    assert state["external_id"] == "calendar_event_fail_attempt"
+    logs = _logs(sync["sync_id"])
+    assert [log["sync_attempt"] for log in logs] == [3, 2]
+    assert logs[0]["error_code"] == "network"
 
 
 def test_stale_update_permanent_failure_goes_failed_permanent():
