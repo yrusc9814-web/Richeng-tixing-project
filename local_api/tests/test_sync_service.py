@@ -785,3 +785,95 @@ class TestStaleResyncService:
 
         persisted = get_sync_state(state["sync_id"])
         assert persisted["external_id"] == "ext_abc123"
+
+
+# ── Phase 23 — Sync state consistency hardening ──────────────────────────
+
+
+class TestMetadataWriteFailure:
+    """metadata write failure must not leave/return synced."""
+
+    def test_metadata_write_failure_does_not_leave_synced(self, monkeypatch):
+        """If update_sync_state fails, record must not be synced and
+        result must not be success."""
+        _insert_task("task_svc_meta_fail", sync_enabled=1)
+
+        # update_sync_state is lazily imported inside run_task_sync from
+        # .sync_state_service, so patch the source module.
+        def _failing_update(sync_id, **kwargs):
+            raise RuntimeError("Simulated DB write failure")
+
+        monkeypatch.setattr(
+            "local_api.services.sync_state_service.update_sync_state",
+            _failing_update,
+        )
+
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+        result = svc.run_task_sync("task_svc_meta_fail", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "failed"
+        assert result["error_code"] == "metadata_write_failed"
+
+        # Verify DB state is NOT synced
+        state = get_sync_state(result["sync_id"])
+        assert state is not None
+        assert state["sync_status"] == "failed"
+        # payload_hash must not be set (metadata write failed)
+        assert state["payload_hash"] is None
+        # external_id from the successful push must not be stored
+        assert state["external_id"] is None
+
+        # Failure log must exist
+        logs = _logs(result["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "metadata_write_failed"
+
+    def test_success_writes_metadata_before_synced_transition(self, monkeypatch):
+        """Metadata (payload_hash, external_id) must be written BEFORE
+        the synced transition, and success log after both."""
+        _insert_task("task_svc_order", sync_enabled=1)
+
+        write_order = []
+
+        # update_sync_state is lazily imported from sync_state_service
+        from local_api.services import sync_state_service as sss_mod
+
+        real_update = sss_mod.update_sync_state
+
+        def _tracked_update(sync_id, **kwargs):
+            write_order.append("update_sync_state")
+            return real_update(sync_id, **kwargs)
+
+        monkeypatch.setattr(sss_mod, "update_sync_state", _tracked_update)
+
+        # _log_sync is a module-level function in sync_service
+        from local_api.services import sync_service as svc_mod
+
+        real_log_sync = svc_mod._log_sync
+
+        def _tracked_log_sync(*args, **kwargs):
+            write_order.append("_log_sync")
+            return real_log_sync(*args, **kwargs)
+
+        monkeypatch.setattr(svc_mod, "_log_sync", _tracked_log_sync)
+
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+        result = svc.run_task_sync("task_svc_order", "apple_calendar")
+
+        assert result["success"] is True
+        assert "update_sync_state" in write_order
+        assert "_log_sync" in write_order
+
+        # update_sync_state must happen before _log_sync
+        update_idx = write_order.index("update_sync_state")
+        log_idx = write_order.index("_log_sync")
+        assert update_idx < log_idx, (
+            f"Expected update_sync_state before _log_sync, got: {write_order}"
+        )
+
+        state = get_sync_state(result["sync_id"])
+        assert state["sync_status"] == "synced"
+        assert state["payload_hash"] is not None
+        assert state["external_id"] is not None

@@ -255,12 +255,47 @@ class SyncService:
             external_id_before = sync_state.get("external_id")
             external_id_after = push_result.external_id
 
+            # Phase 23: Write success metadata while state is still
+            # in_progress.  Only transition to synced after the metadata
+            # write succeeds, so a DB failure cannot leave a synced record
+            # without refreshed payload_hash / external_id / last_synced_at.
+            from .sync_state_service import update_sync_state
+
+            try:
+                update_sync_state(
+                    sync_id,
+                    external_id=external_id_after,
+                    last_synced_at=_iso_now(),
+                    payload_hash=payload_hash_after,
+                )
+            except Exception as metadata_exc:
+                logger.exception(
+                    "Metadata write failed for %s: %s", sync_id, metadata_exc
+                )
+                _safe_transition(sync_id, "failed", trigger="engine")
+                _log_failure(
+                    sync_id,
+                    task_id,
+                    sync_target,
+                    attempt=push_result.sync_attempt,
+                    code="metadata_write_failed",
+                    message=str(metadata_exc),
+                )
+                return _error_result(
+                    sync_id=sync_id,
+                    status="failed",
+                    code="metadata_write_failed",
+                    message=str(metadata_exc),
+                )
+
             transitioned, transition_error = _safe_transition(
                 sync_id, "synced", trigger="engine"
             )
             if transitioned is None:
                 _log_failure(
-                    sync_id, task_id, sync_target,
+                    sync_id,
+                    task_id,
+                    sync_target,
                     attempt=push_result.sync_attempt,
                     code="invalid_transition",
                     message=str(transition_error),
@@ -273,22 +308,11 @@ class SyncService:
                     message=str(transition_error),
                     external_id=sync_state.get("external_id"),
                 )
-            # Update external_id and payload_hash on sync_state
-            try:
-                from .sync_state_service import update_sync_state
-
-                update_sync_state(
-                    sync_id,
-                    external_id=external_id_after,
-                    last_synced_at=_iso_now(),
-                    payload_hash=payload_hash_after,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Could not update external_id for %s: %s", sync_id, exc,
-                )
             _log_sync(
-                sync_id, task_id, sync_target, push_result.sync_attempt,
+                sync_id,
+                task_id,
+                sync_target,
+                push_result.sync_attempt,
                 payload_hash_before=payload_hash_before,
                 payload_hash_after=payload_hash_after,
                 external_id_before=external_id_before,

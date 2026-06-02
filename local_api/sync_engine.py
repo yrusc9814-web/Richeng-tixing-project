@@ -402,13 +402,41 @@ class SyncEngine:
                     external_id_before = current.get("external_id")
                     external_id_after = push_result.external_id
 
+                    # Phase 23: Write success metadata while state is still
+                    # in_progress.  Only transition to synced after the
+                    # metadata write succeeds, so a DB failure cannot leave
+                    # a synced record without refreshed payload_hash /
+                    # external_id / last_synced_at.
+                    try:
+                        update_sync_state(
+                            sync_id,
+                            external_id=external_id_after,
+                            last_synced_at=_now().isoformat(),
+                            payload_hash=payload_hash_after,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Metadata write failed for %s", sync_id
+                        )
+                        transition_sync_state(
+                            sync_id, "failed", trigger="engine"
+                        )
+                        create_sync_log(
+                            sync_id=sync_id,
+                            local_task_id=task_id,
+                            sync_target=sync_target,
+                            sync_attempt=attempt,
+                            sync_result="failed",
+                            error_code="metadata_write_failed",
+                            error_message=(
+                                "Failed to persist sync metadata "
+                                "(payload_hash/external_id/last_synced_at)"
+                            ),
+                            triggered_by="sync_engine",
+                        )
+                        continue
+
                     transition_sync_state(sync_id, "synced", trigger="engine")
-                    update_sync_state(
-                        sync_id,
-                        external_id=external_id_after,
-                        last_synced_at=_now().isoformat(),
-                        payload_hash=payload_hash_after,
-                    )
                     create_sync_log(
                         sync_id=sync_id,
                         local_task_id=task_id,

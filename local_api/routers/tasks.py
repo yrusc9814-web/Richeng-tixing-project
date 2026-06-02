@@ -163,6 +163,32 @@ def _sync_calendar_state_after_task_update(before: dict, after: dict) -> None:
         # Legacy fallback: no stored payload_hash — use field-diff
         if _sync_relevant_fields_changed(before, after):
             transition_sync_state(existing["sync_id"], "stale", trigger="trigger")
+
+            # Phase 23: write traceable drift log for legacy no-hash rows
+            changed_fields = sorted(
+                f for f in _SYNC_RELEVANT_TASK_FIELDS
+                if before.get(f) != after.get(f)
+            )
+            drift_fields = ",".join(changed_fields) if changed_fields else None
+            try:
+                create_sync_log(
+                    sync_id=existing["sync_id"],
+                    local_task_id=after["task_id"],
+                    sync_target=_CALENDAR_SYNC_TARGET,
+                    sync_result="drift_detected",
+                    drift_detected=True,
+                    drift_fields=drift_fields,
+                    payload_hash_before=None,  # legacy: no stored hash
+                    payload_hash_after=compute_task_payload_hash(after),
+                    external_id_before=existing["external_id"],
+                    external_id_after=existing["external_id"],
+                    triggered_by="system",
+                )
+            except Exception:
+                logger.warning(
+                    "drift_log_write_failed task_id=%s sync_id=%s (legacy no-hash)",
+                    after["task_id"], existing["sync_id"],
+                )
         return
 
     if existing is None or existing.get("sync_status") != "synced":

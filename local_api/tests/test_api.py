@@ -528,11 +528,18 @@ class TestUpdateTask:
         row = self._calendar_sync_rows(task_id)[0]
         assert row["sync_status"] == "stale"
         assert row["external_id"] == "calendar-event-no-write"
+        # Phase 23: legacy no-hash drift writes a drift_detected log.
+        # No Calendar write or sync run occurs — only a trace log.
         log_count = get_db().execute(
             "SELECT COUNT(*) AS cnt FROM sync_logs WHERE local_task_id = ?",
             (task_id,),
         ).fetchone()["cnt"]
-        assert log_count == 0
+        assert log_count == 1
+        # Verify it's a drift_detected log, not a success/failed sync log
+        from local_api.services.sync_log_service import list_sync_logs
+        logs, _ = list_sync_logs(sync_id=row["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "drift_detected"
 
     def test_update_unsynced_eligible_task_keeps_pending_sync_state(self):
         task_id = self._create_calendar_task()
@@ -742,7 +749,8 @@ class TestUpdateTask:
         assert cal_state is None
 
     def test_synced_task_legacy_no_stored_hash_still_becomes_stale(self):
-        """When stored payload_hash is missing (legacy), sync-relevant change still → stale."""
+        """When stored payload_hash is missing (legacy), sync-relevant change still → stale
+        AND Phase 23 writes a traceable drift log."""
         task_id = self._create_calendar_task(title="Legacy no hash")
         sync_id = self._mark_calendar_synced(task_id, external_id="calendar-legacy-001")
         # Deliberately leave payload_hash as NULL (legacy row)
@@ -757,7 +765,41 @@ class TestUpdateTask:
         rows = self._calendar_sync_rows(task_id)
         assert len(rows) == 1
         assert rows[0]["sync_status"] == "stale"
-        # No drift log for legacy (hash was missing, can't compare)
+
+        # Phase 23: legacy no-hash drift now writes a traceable drift_detected log
+        from local_api.services.sync_log_service import list_sync_logs
+        logs, _ = list_sync_logs(sync_id=sync_id)
+        drift_logs = [l for l in logs if l["sync_result"] == "drift_detected"]
+        assert len(drift_logs) == 1, (
+            "Phase 23: legacy no-hash drift must write a traceable drift_detected log"
+        )
+        drift = drift_logs[0]
+        assert drift["drift_detected"] == 1
+        assert drift["payload_hash_before"] is None  # legacy: no stored hash
+        assert drift["payload_hash_after"] is not None
+        assert "title" in (drift["drift_fields"] or "")
+        assert drift["external_id_before"] == "calendar-legacy-001"
+        assert drift["external_id_after"] == "calendar-legacy-001"
+
+    def test_synced_task_legacy_no_hash_no_sync_field_change_stays_synced(self):
+        """Legacy row with no stored hash: non-sync field change → stays synced, no drift log."""
+        task_id = self._create_calendar_task(title="Legacy no hash unchanged")
+        sync_id = self._mark_calendar_synced(task_id, external_id="calendar-legacy-nodrift")
+        # Deliberately leave payload_hash as NULL (legacy row)
+
+        # Patch a non-sync-relevant field (need_weather_check is excluded from payload)
+        resp = client.patch(
+            f"/api/tasks/{task_id}",
+            json={"need_weather_check": True},
+            headers=AUTH_HEADER,
+        )
+
+        assert resp.status_code == 200
+        rows = self._calendar_sync_rows(task_id)
+        assert len(rows) == 1
+        assert rows[0]["sync_status"] == "synced"
+
+        # No drift log
         from local_api.services.sync_log_service import list_sync_logs
         logs, _ = list_sync_logs(sync_id=sync_id)
         drift_logs = [l for l in logs if l["sync_result"] == "drift_detected"]

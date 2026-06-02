@@ -705,3 +705,100 @@ def test_apple_reminder_stale_does_not_route_to_calendar_adapter():
     logs = _logs(sync["sync_id"])
     assert len(logs) == 1
     assert logs[0]["error_code"] == "adapter_not_found"
+
+
+# ── Phase 23 — Sync state consistency hardening ──────────────────────────
+
+
+def test_metadata_write_failure_does_not_leave_synced(monkeypatch):
+    """If update_sync_state fails during success path, record must not be synced."""
+
+    class MetadataFailingAdapter(MockAppleAdapter):
+        """Adapter that succeeds at push to trigger metadata write path."""
+
+        def push(self, task_data: dict, sync_state: dict):
+            return AdapterResult(
+                success=True,
+                external_id="ext_should_not_persist",
+                sync_result="success",
+            )
+
+    sync = _sync("task_engine_meta_fail")
+    # Transition to in_progress so adapter push cycle picks it up
+    transition_sync_state(sync["sync_id"], "in_progress", trigger="engine")
+
+    # Make update_sync_state raise to simulate metadata write failure
+    call_count = [0]
+
+    def _failing_update(sync_id, **kwargs):
+        call_count[0] += 1
+        raise RuntimeError("Simulated DB write failure")
+
+    monkeypatch.setattr(
+        "local_api.sync_engine.update_sync_state",
+        _failing_update,
+    )
+
+    engine = SyncEngine(adapters=[MetadataFailingAdapter()])
+    engine._adapter_push_cycle([get_sync_state(sync["sync_id"])])
+
+    assert call_count[0] == 1
+
+    state = get_sync_state(sync["sync_id"])
+    # Must NOT be synced — metadata write failed, so state should be failed
+    assert state["sync_status"] == "failed"
+    assert state["payload_hash"] is None
+    assert state["external_id"] is None
+
+    # Failure log must be written
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["sync_result"] == "failed"
+    assert logs[0]["error_code"] == "metadata_write_failed"
+
+
+def test_sync_success_writes_metadata_before_synced_transition(monkeypatch):
+    """Metadata (payload_hash, external_id) must be written BEFORE synced transition."""
+
+    write_order = []
+
+    real_update = update_sync_state
+
+    def _tracked_update(sync_id, **kwargs):
+        write_order.append("update_sync_state")
+        return real_update(sync_id, **kwargs)
+
+    monkeypatch.setattr(
+        "local_api.sync_engine.update_sync_state",
+        _tracked_update,
+    )
+
+    from local_api.services.sync_state_service import transition_sync_state as real_transition
+
+    def _tracked_transition(sync_id, to_status, *, trigger="engine"):
+        write_order.append(f"transition_to_{to_status}")
+        return real_transition(sync_id, to_status, trigger=trigger)
+
+    monkeypatch.setattr(
+        "local_api.sync_engine.transition_sync_state",
+        _tracked_transition,
+    )
+
+    sync = _sync("task_engine_order_check")
+    transition_sync_state(sync["sync_id"], "in_progress", trigger="engine")
+
+    engine = SyncEngine(adapters=_adapters())
+    engine._adapter_push_cycle([get_sync_state(sync["sync_id"])])
+
+    # Verify: metadata written BEFORE synced transition
+    assert "update_sync_state" in write_order
+    synced_idx = write_order.index("transition_to_synced")
+    update_idx = write_order.index("update_sync_state")
+    assert update_idx < synced_idx, (
+        f"Expected update_sync_state before transition_to_synced, got: {write_order}"
+    )
+
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "synced"
+    assert state["payload_hash"] is not None
+    assert state["external_id"] is not None
