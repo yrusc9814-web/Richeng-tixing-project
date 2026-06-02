@@ -169,10 +169,27 @@ class SyncService:
         eligibility = eligible_for_calendar_sync(task_data, sync_target)
         if not eligibility.allowed:
             if sync_id is not None:
-                _safe_transition(sync_id, "skipped", trigger="manual")
+                transitioned, _ = _safe_transition(
+                    sync_id, "skipped", trigger="manual"
+                )
+                if transitioned is not None:
+                    result_status = "skipped"
+                else:
+                    # Transition to "skipped" is illegal from stale/failed
+                    # states. Keep the existing status to avoid returning
+                    # "skipped" while the DB still shows stale/failed.
+                    result_status = sync_state.get("sync_status", "skipped")
+                _log_failure(
+                    sync_id, task_id, sync_target,
+                    attempt=1,
+                    code=eligibility.reason,
+                    message=f"Calendar sync eligibility failed: {eligibility.reason}",
+                )
+            else:
+                result_status = "skipped"
             return _error_result(
                 sync_id=sync_id,
-                status="skipped",
+                status=result_status,
                 code=eligibility.reason,
                 message=f"Calendar sync eligibility failed: {eligibility.reason}",
                 external_id=sync_state.get("external_id") if sync_state else None,

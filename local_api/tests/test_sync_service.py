@@ -393,6 +393,134 @@ class TestRunTaskSyncGuardrails:
         assert logs[0]["sync_result"] == "success"
 
 
+# ── Phase 25 — Eligibility failure with stale/failed sync_state ────────
+
+
+class TestEligibilityFailureStaleFailed:
+    """Eligibility failures on stale/failed records must preserve external_id,
+    not refresh payload_hash/last_synced_at, and write a sync_log."""
+
+    def test_stale_record_eligibility_failure_preserves_state_and_external_id(self):
+        """Stale record that fails eligibility must:
+        - not push to adapter
+        - not change external_id
+        - not refresh payload_hash or last_synced_at
+        - return the actual persisted status (not "skipped")
+        - write a sync_log with the eligibility reason
+        """
+        _insert_task(
+            "task_stale_elig", sync_enabled=1, start_time=None, due_time=None,
+        )
+        state = create_sync_state(
+            "task_stale_elig", "apple_calendar", sync_status="synced",
+        )
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_stale_elig",
+            payload_hash="old_hash_stale_elig",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+        transition_sync_state(state["sync_id"], "stale", trigger="trigger")
+
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_stale_elig", "apple_calendar")
+
+        # Adapter must not be called
+        assert adapter.push_count == 0
+
+        # Returned status must match persisted state (stale → skipped is illegal)
+        assert result["success"] is False
+        assert result["sync_status"] == "stale"
+        assert result["sync_id"] == state["sync_id"]
+        assert result["error_code"] == "missing_time"
+
+        # DB state must be unchanged
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "stale"
+        assert persisted["external_id"] == "ext_stale_elig"
+        assert persisted["payload_hash"] == "old_hash_stale_elig"
+        assert persisted["last_synced_at"] == "2026-06-01T00:00:00"
+
+        # Sync_log must be written with eligibility reason
+        logs = _logs(state["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "missing_time"
+
+    def test_failed_record_eligibility_failure_preserves_state_and_external_id(self):
+        """Failed record that fails eligibility must behave the same as stale:
+        preserve state, not push, write sync_log."""
+        _insert_task(
+            "task_failed_elig", sync_enabled=1, start_time=None, due_time=None,
+        )
+        state = create_sync_state(
+            "task_failed_elig", "apple_calendar", sync_status="failed",
+        )
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_failed_elig",
+            payload_hash="old_hash_failed_elig",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_failed_elig", "apple_calendar")
+
+        # Adapter must not be called
+        assert adapter.push_count == 0
+
+        # Returned status must match persisted state
+        assert result["success"] is False
+        assert result["sync_status"] == "failed"
+        assert result["sync_id"] == state["sync_id"]
+        assert result["error_code"] == "missing_time"
+
+        # DB state must be unchanged
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "failed"
+        assert persisted["external_id"] == "ext_failed_elig"
+        assert persisted["payload_hash"] == "old_hash_failed_elig"
+        assert persisted["last_synced_at"] == "2026-06-01T00:00:00"
+
+        # Sync_log must be written with eligibility reason
+        logs = _logs(state["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "missing_time"
+
+    def test_pending_record_eligibility_failure_still_transitions_to_skipped(self):
+        """Pending records must still transition to skipped when eligibility fails,
+        and the sync_log must be written."""
+        _insert_task(
+            "task_pending_elig", sync_enabled=1, start_time=None, due_time=None,
+        )
+        state = create_sync_state("task_pending_elig", "apple_calendar")
+
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_pending_elig", "apple_calendar")
+
+        assert adapter.push_count == 0
+        assert result["success"] is False
+        assert result["sync_status"] == "skipped"
+        assert result["sync_id"] == state["sync_id"]
+        assert result["error_code"] == "missing_time"
+
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "skipped"
+
+        # Sync_log must now be written (previously missing)
+        logs = _logs(state["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "missing_time"
+
+
 # ── Tests: run_task_sync — error paths ────────────────────────────────
 
 
