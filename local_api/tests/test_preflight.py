@@ -173,6 +173,7 @@ class TestPreflightOnNonMacOS:
         assert check is not None
         assert check.status == PreflightStatus.PASS
 
+    @pytest.mark.skipif(sys.platform == "darwin", reason="Non-macOS platform test; on macOS EventKit / PyObjC availability varies")
     def test_readiness_not_ready_on_non_macos(self):
         report = run_preflight()
         assert report.readiness == ReadinessLevel.NOT_READY
