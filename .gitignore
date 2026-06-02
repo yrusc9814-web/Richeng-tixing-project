@@ -19,6 +19,9 @@ venv/
 # Database & runtime
 *.sqlite
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 logs/
 tmp/
 temp/
