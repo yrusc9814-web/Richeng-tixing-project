@@ -530,3 +530,178 @@ def test_sync_success_log_includes_payload_hashes():
     assert len(logs[0]["payload_hash_after"]) == 64
     # external_id_after should be set
     assert logs[0]["external_id_after"] is not None
+
+
+# ── Phase 22 — Stale resync update closure ──────────────────────────────
+
+
+from local_api.sync_client.payload import compute_task_payload_hash
+
+
+def test_stale_update_success_refreshes_payload_hash():
+    """Stale resync with task mutation refreshes payload_hash on sync_state."""
+
+    class PhashPreservingAdapter(MockAppleAdapter):
+        """Adapter that preserves existing external_id (update semantics)."""
+
+        def push(self, task_data: dict, sync_state: dict):
+            external_id = sync_state.get("external_id")
+            if external_id:
+                return AdapterResult(
+                    success=True,
+                    external_id=external_id,
+                    sync_result="success",
+                )
+            return super().push(task_data, sync_state)
+
+    sync = _sync("task_engine_stale_phash_refresh", status="synced")
+    update_sync_state(
+        sync["sync_id"],
+        external_id="calendar_event_phash",
+        payload_hash="old_hash_should_be_replaced",
+    )
+    transition_sync_state(sync["sync_id"], "stale", trigger="trigger")
+
+    # Mutate the task to change its payload_hash
+    conn = get_db()
+    conn.execute(
+        "UPDATE tasks SET title = ? WHERE task_id = ?",
+        ("Updated title for phash", sync["task_id"]),
+    )
+    conn.commit()
+
+    engine = SyncEngine(adapters=[PhashPreservingAdapter()])
+
+    # First scan: stale → pending
+    stale_result = engine.scan_once()
+    assert stale_result.stale_triggered == 1
+
+    # Second scan: pending → push → synced
+    push_result = engine.scan_once()
+    assert push_result.pending_picked == 1
+
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "synced"
+    assert state["external_id"] == "calendar_event_phash"
+    assert state["payload_hash"] is not None
+    assert state["payload_hash"] != "old_hash_should_be_replaced"
+    assert len(state["payload_hash"]) == 64
+
+    # Verify the hash matches the current (mutated) task data
+    conn = get_db()
+    task_row = conn.execute(
+        "SELECT * FROM tasks WHERE task_id = ?", (sync["task_id"],)
+    ).fetchone()
+    expected_hash = compute_task_payload_hash(dict(task_row))
+    assert state["payload_hash"] == expected_hash
+
+    # Verify success log has payload_hash fields
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["sync_result"] == "success"
+    assert logs[0]["payload_hash_before"] == "old_hash_should_be_replaced"
+    assert logs[0]["payload_hash_after"] == expected_hash
+    assert logs[0]["external_id_before"] == "calendar_event_phash"
+    assert logs[0]["external_id_after"] == "calendar_event_phash"
+
+
+def test_stale_update_failure_does_not_mark_synced():
+    """Stale resync with adapter failure preserves external_id and logs failure."""
+
+    class FailingUpdateAdapter(MockAppleAdapter):
+        def push(self, task_data: dict, sync_state: dict):
+            return AdapterResult(
+                success=False,
+                error_code="network",
+                error_message="Simulated network error",
+                sync_result="failed",
+            )
+
+    sync = _sync("task_engine_stale_fail", status="synced")
+    update_sync_state(sync["sync_id"], external_id="calendar_event_fail")
+    transition_sync_state(sync["sync_id"], "stale", trigger="trigger")
+    adapter = FailingUpdateAdapter()
+    engine = SyncEngine(adapters=[adapter])
+
+    # First scan: stale → pending
+    stale_result = engine.scan_once()
+    assert stale_result.stale_triggered == 1
+
+    # Second scan: pending → push → failed
+    push_result = engine.scan_once()
+    assert push_result.pending_picked == 1
+
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "failed"
+    assert state["external_id"] == "calendar_event_fail"
+
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["sync_result"] == "failed"
+    assert logs[0]["error_code"] == "network"
+
+
+def test_stale_update_permanent_failure_goes_failed_permanent():
+    """Stale resync with permanent adapter error (auth_failed) goes failed_permanent."""
+
+    class AuthFailAdapter(MockAppleAdapter):
+        def push(self, task_data: dict, sync_state: dict):
+            return AdapterResult(
+                success=False,
+                error_code="auth_failed",
+                error_message="Invalid credentials",
+                sync_result="failed",
+            )
+
+    sync = _sync("task_engine_stale_permfail", status="synced")
+    update_sync_state(sync["sync_id"], external_id="calendar_event_permfail")
+    transition_sync_state(sync["sync_id"], "stale", trigger="trigger")
+    adapter = AuthFailAdapter()
+    engine = SyncEngine(adapters=[adapter])
+
+    # First scan: stale → pending
+    engine.scan_once()
+    # Second scan: pending → push → failed_permanent
+    engine.scan_once()
+
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "failed_permanent"
+    assert state["external_id"] == "calendar_event_permfail"
+
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["sync_result"] == "failed"
+    assert logs[0]["error_code"] == "auth_failed"
+
+
+def test_apple_reminder_stale_does_not_route_to_calendar_adapter():
+    """apple_reminder stale/pending must never route through the Calendar adapter."""
+
+    class CountingCalendarAdapter(MockAppleAdapter):
+        def __init__(self):
+            self.push_count = 0
+
+        def push(self, task_data: dict, sync_state: dict):
+            self.push_count += 1
+            return super().push(task_data, sync_state)
+
+    sync = _sync("task_engine_reminder_stale", target="apple_reminder", status="synced")
+    update_sync_state(sync["sync_id"], external_id="reminder_ext_stale")
+    transition_sync_state(sync["sync_id"], "stale", trigger="trigger")
+    adapter = CountingCalendarAdapter()
+    engine = SyncEngine(adapters=[adapter])
+
+    # First scan: stale → pending
+    stale_result = engine.scan_once()
+    assert stale_result.stale_triggered == 1
+
+    # Second scan: pending — but reminder has no adapter → failed_permanent
+    push_result = engine.scan_once()
+    assert push_result.pending_picked == 1
+
+    assert adapter.push_count == 0
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "failed_permanent"
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["error_code"] == "adapter_not_found"

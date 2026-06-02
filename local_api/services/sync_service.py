@@ -192,6 +192,32 @@ class SyncService:
                     message=str(e),
                 )
 
+        # 6.5 Phase 22: stale records require pre-transition to pending
+        # before the normal pending → in_progress transition.
+        # stale → in_progress is illegal; the legal chain is
+        # stale → pending → in_progress → synced/failed.
+        if sync_state.get("sync_status") == "stale":
+            pre_transitioned, pre_error = _safe_transition(
+                sync_id, "pending", trigger="engine"
+            )
+            if pre_transitioned is None:
+                return _error_result(
+                    sync_id=sync_id,
+                    status=sync_state.get("sync_status", "stale"),
+                    code="invalid_transition",
+                    message=f"stale→pending pre-transition failed: {pre_error}",
+                    external_id=sync_state.get("external_id"),
+                )
+            # Re-read after pre-transition so adapter receives current state
+            sync_state = get_sync_state_by_key(task_id, sync_target)
+            if sync_state is None:
+                return _error_result(
+                    sync_id=sync_id,
+                    status="failed_permanent",
+                    code="state_lookup_failed",
+                    message="sync_state disappeared after stale→pending transition",
+                )
+
         # 7. Transition to in_progress
         transitioned, transition_error = _safe_transition(
             sync_id, "in_progress", trigger="engine"
