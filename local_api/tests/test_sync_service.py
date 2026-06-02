@@ -641,7 +641,42 @@ class TestStaleResyncService:
     """run_task_sync on stale records with external_id performs update (not create)."""
 
     def test_stale_resync_legal_path_calls_adapter_with_external_id(self):
-        """Direct service call on stale+external_id transitions legally and updates."""
+        """Direct service call on stale+external_id transitions legally and updates.
+
+        Phase 24 strengthened assertions:
+        - payload_hash_before / payload_hash_after in sync_log
+        - external_id_before / external_id_after in sync_log
+        - last_synced_at is refreshed (non-null)
+        - stale update does not lose external_id (preserved by update adapter)
+        """
+
+        class PreservingUpdateAdapter(SyncAdapter):
+            """Adapter that preserves existing external_id for update semantics."""
+
+            @property
+            def target_name(self) -> str:
+                return "apple_calendar"
+
+            def validate_config(self) -> tuple[bool, Optional[str]]:
+                return (True, None)
+
+            def push(self, task_data: dict, sync_state: dict) -> AdapterResult:
+                external_id = sync_state.get("external_id")
+                if external_id:
+                    return AdapterResult(
+                        success=True,
+                        external_id=external_id,
+                        sync_result="success",
+                    )
+                return AdapterResult(
+                    success=True,
+                    external_id="ext_new_fallback",
+                    sync_result="success",
+                )
+
+            def pull(self, external_id: str) -> Optional[dict]:
+                return None
+
         _insert_task("task_svc_stale_001", sync_enabled=1)
         # Create a synced record with external_id, then mark stale
         state = create_sync_state(
@@ -650,11 +685,12 @@ class TestStaleResyncService:
         update_sync_state(
             state["sync_id"],
             external_id="ext_stale_update_001",
+            payload_hash="old_hash_before_stale_update",
             last_synced_at="2026-06-01T00:00:00",
         )
         transition_sync_state(state["sync_id"], "stale", trigger="trigger")
 
-        adapter = CountingSuccessAdapter()
+        adapter = PreservingUpdateAdapter()
         svc = SyncService(adapters=[adapter])
 
         result = svc.run_task_sync("task_svc_stale_001", "apple_calendar")
@@ -662,11 +698,25 @@ class TestStaleResyncService:
         assert result["success"] is True
         assert result["sync_status"] == "synced"
         assert result["sync_id"] == state["sync_id"]
-        assert adapter.push_count == 1
 
         persisted = get_sync_state(state["sync_id"])
         assert persisted["sync_status"] == "synced"
-        assert persisted["external_id"] == "ext_abc123"
+        # stale update must preserve the existing external_id
+        assert persisted["external_id"] == "ext_stale_update_001"
+        # last_synced_at must be refreshed (non-null after successful push)
+        assert persisted["last_synced_at"] is not None
+        # payload_hash must be refreshed
+        assert persisted["payload_hash"] is not None
+        assert len(persisted["payload_hash"]) == 64
+
+        # Verify sync_log diagnostics
+        logs = _logs(state["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "success"
+        assert logs[0]["payload_hash_before"] == "old_hash_before_stale_update"
+        assert logs[0]["payload_hash_after"] == persisted["payload_hash"]
+        assert logs[0]["external_id_before"] == "ext_stale_update_001"
+        assert logs[0]["external_id_after"] == "ext_stale_update_001"
 
     def test_stale_resync_success_refreshes_payload_hash(self):
         """Stale resync success replaces old payload_hash with current task hash."""

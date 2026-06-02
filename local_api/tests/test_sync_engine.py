@@ -802,3 +802,53 @@ def test_sync_success_writes_metadata_before_synced_transition(monkeypatch):
     assert state["sync_status"] == "synced"
     assert state["payload_hash"] is not None
     assert state["external_id"] is not None
+
+
+# ── Phase 24 — Apple Calendar sync state consistency regression ───────────
+
+
+def test_pending_no_time_at_push_goes_failed_permanent_without_adapter_call():
+    """Pending apple_calendar record whose task loses time before push must fail.
+
+    When the eligibility recheck inside _adapter_push_cycle finds the task
+    no longer has start_time/due_time, the engine must:
+    - NOT call adapter.push
+    - transition sync_state to failed_permanent
+    - leave external_id, payload_hash, last_synced_at unset
+    - log a failed sync_log with error_code=missing_time
+    """
+
+    class CountingCalendarAdapter(MockAppleAdapter):
+        def __init__(self):
+            self.push_count = 0
+
+        def push(self, task_data: dict, sync_state: dict):
+            self.push_count += 1
+            return super().push(task_data, sync_state)
+
+    sync = _sync("task_engine_no_time_push")
+    # Mutate task to remove time fields AFTER sync_state creation but
+    # BEFORE scan — simulates task becoming no-time between enqueue and push.
+    conn = get_db()
+    conn.execute(
+        "UPDATE tasks SET start_time = NULL, due_time = NULL WHERE task_id = ?",
+        (sync["task_id"],),
+    )
+    conn.commit()
+
+    adapter = CountingCalendarAdapter()
+    result = SyncEngine(adapters=[adapter]).scan_once()
+
+    assert result.pending_picked == 1
+    assert adapter.push_count == 0
+
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "failed_permanent"
+    assert state["external_id"] is None
+    assert state["payload_hash"] is None
+    assert state["last_synced_at"] is None
+
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["sync_result"] == "failed"
+    assert logs[0]["error_code"] == "missing_time"

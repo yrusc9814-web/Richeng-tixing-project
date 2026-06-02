@@ -542,6 +542,37 @@ class TestAppleSyncAdapterRealMode:
         assert _FakeEKEvent.created_count == 1
         assert store.saved_events == store.created_events
 
+    def test_real_mode_save_event_returns_false_is_calendar_save_failed(self, monkeypatch):
+        """When EventKit saveEvent returns False, result must be calendar_save_failed."""
+
+        class _FailingSaveStore(_FakeStore):
+            def saveEvent_span_error_(self, event, span, error):
+                self.saved_events.append(event)
+                return (False, None)
+
+        store = _FailingSaveStore()
+        _install_fake_eventkit(monkeypatch, store)
+        adapter = AppleSyncAdapter(target="apple_calendar")
+
+        result = adapter._push_real(
+            {
+                "task_id": "task_save_fail",
+                "title": "Will fail to save",
+                "start_time": "2026-06-01T10:00:00+08:00",
+                "due_time": "2026-06-01T10:30:00+08:00",
+            },
+            {
+                "sync_id": "sync_save_fail",
+                "sync_target": "apple_calendar",
+            },
+        )
+
+        assert result.success is False
+        assert result.sync_result == "failed"
+        assert result.error_code == "calendar_save_failed"
+        assert result.external_id is None
+        assert "EventKit saveEvent returned False" in result.error_message
+
     def test_dry_run_and_test_mode_do_not_reach_real_calendar_write(self, monkeypatch):
         def fail_push_real(self, task_data, sync_state):
             raise AssertionError("real Calendar write must not be reached")
