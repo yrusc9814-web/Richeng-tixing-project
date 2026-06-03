@@ -130,6 +130,7 @@ class SyncEngine:
         rows = conn.execute(
             """SELECT * FROM sync_state
                WHERE sync_status = 'in_progress'
+                 AND sync_target = 'apple_calendar'
                ORDER BY updated_at ASC
                LIMIT ?""",
             (self._batch_size,),
@@ -175,6 +176,7 @@ class SyncEngine:
         rows = conn.execute(
             """SELECT * FROM sync_state
                WHERE sync_status = 'failed'
+                 AND sync_target = 'apple_calendar'
                ORDER BY updated_at ASC
                LIMIT ?""",
             (self._batch_size,),
@@ -226,6 +228,7 @@ class SyncEngine:
         rows = conn.execute(
             """SELECT * FROM sync_state
                WHERE sync_status = 'stale'
+                 AND sync_target = 'apple_calendar'
                ORDER BY updated_at ASC
                LIMIT ?""",
             (self._batch_size,),
@@ -248,6 +251,7 @@ class SyncEngine:
         rows = conn.execute(
             """SELECT * FROM sync_state
                WHERE sync_status = 'pending'
+                 AND sync_target = 'apple_calendar'
                ORDER BY updated_at ASC
                LIMIT ?""",
             (self._batch_size,),

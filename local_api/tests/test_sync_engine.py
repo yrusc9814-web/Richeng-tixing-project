@@ -365,7 +365,7 @@ def test_route_adapter_returns_apple_for_apple_targets():
 
 
 def test_apple_reminder_pending_does_not_route_to_calendar_adapter():
-    """apple_reminder must not fall through to the Calendar adapter."""
+    """apple_reminder pending must not be picked by engine lifecycle."""
 
     class CountingCalendarAdapter(MockAppleAdapter):
         def __init__(self):
@@ -381,13 +381,14 @@ def test_apple_reminder_pending_does_not_route_to_calendar_adapter():
 
     result = engine.scan_once()
 
-    assert result.pending_picked == 1
+    # Engine lifecycle filters to apple_calendar only — reminder stays pending
+    assert result.pending_picked == 0
     assert adapter.push_count == 0
     state = get_sync_state(sync["sync_id"])
-    assert state["sync_status"] == "failed_permanent"
+    assert state["sync_status"] == "pending"
+    # No log should be generated because engine never touched this row
     logs = _logs(sync["sync_id"])
-    assert len(logs) == 1
-    assert logs[0]["error_code"] == "adapter_not_found"
+    assert len(logs) == 0
 
 
 def test_adapter_cycle_rechecks_calendar_eligibility_before_push():
@@ -715,7 +716,7 @@ def test_stale_update_permanent_failure_goes_failed_permanent():
 
 
 def test_apple_reminder_stale_does_not_route_to_calendar_adapter():
-    """apple_reminder stale/pending must never route through the Calendar adapter."""
+    """apple_reminder stale must not be processed by engine lifecycle."""
 
     class CountingCalendarAdapter(MockAppleAdapter):
         def __init__(self):
@@ -731,20 +732,124 @@ def test_apple_reminder_stale_does_not_route_to_calendar_adapter():
     adapter = CountingCalendarAdapter()
     engine = SyncEngine(adapters=[adapter])
 
-    # First scan: stale → pending
-    stale_result = engine.scan_once()
-    assert stale_result.stale_triggered == 1
+    # Engine lifecycle filters to apple_calendar only — reminder stays stale
+    result = engine.scan_once()
+    assert result.stale_triggered == 0
 
-    # Second scan: pending — but reminder has no adapter → failed_permanent
-    push_result = engine.scan_once()
-    assert push_result.pending_picked == 1
-
+    # Reminder remains stale, no adapter calls, no logs generated
     assert adapter.push_count == 0
     state = get_sync_state(sync["sync_id"])
-    assert state["sync_status"] == "failed_permanent"
+    assert state["sync_status"] == "stale"
     logs = _logs(sync["sync_id"])
-    assert len(logs) == 1
-    assert logs[0]["error_code"] == "adapter_not_found"
+    assert len(logs) == 0
+
+
+# ── Phase 29 — Reminder queue lifecycle isolation ─────────────────────────
+
+
+def test_apple_reminder_failed_not_retried_or_capped():
+    """apple_reminder failed rows must not be retried or capped by engine."""
+
+    class CountingCalendarAdapter(MockAppleAdapter):
+        def __init__(self):
+            self.push_count = 0
+
+        def push(self, task_data: dict, sync_state: dict):
+            self.push_count += 1
+            return super().push(task_data, sync_state)
+
+    sync = _sync("task_engine_reminder_failed", target="apple_reminder", status="failed")
+    # Add 4 failed attempts — if engine processed this, it would hit retry cap
+    for attempt in (1, 2, 3, 4):
+        create_sync_log(
+            sync_id=sync["sync_id"],
+            local_task_id=sync["task_id"],
+            sync_target=sync["sync_target"],
+            sync_attempt=attempt,
+            sync_result="failed",
+            error_code="network",
+            triggered_by="test",
+        )
+    # Set log timestamps old enough for backoff to have expired
+    conn = get_db()
+    conn.execute(
+        "UPDATE sync_logs SET created_at = ? WHERE sync_id = ?",
+        (_iso(_now() - timedelta(seconds=3600)), sync["sync_id"]),
+    )
+    conn.commit()
+
+    adapter = CountingCalendarAdapter()
+    result = SyncEngine(adapters=[adapter]).scan_once()
+
+    # Engine must not retry or cap the reminder row
+    assert result.retry_triggered == 0
+    assert result.failed == 0
+    assert adapter.push_count == 0
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "failed"
+    # No new logs beyond the 4 synthetic ones
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 4
+
+
+def test_apple_reminder_timeout_not_processed():
+    """apple_reminder timed-out in_progress must not be failed by engine."""
+
+    sync = _sync(
+        "task_engine_reminder_timeout", target="apple_reminder", status="in_progress"
+    )
+    _set_updated_at(sync["sync_id"], _now() - timedelta(seconds=301))
+
+    result = SyncEngine().scan_once()
+
+    # Timeout handler filters to apple_calendar only — reminder stays in_progress
+    assert result.timeout_detected == 0
+    assert result.failed == 0
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "in_progress"
+    # No timeout log generated
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 0
+
+
+def test_mixed_calendar_and_reminder_pending_processes_only_calendar():
+    """Mixed pending scan picks calendar, leaves reminder untouched."""
+
+    class TrackingCalendarAdapter(MockAppleAdapter):
+        def __init__(self):
+            self.push_count = 0
+            self.pushed_task_ids: list[str] = []
+
+        def push(self, task_data: dict, sync_state: dict):
+            self.push_count += 1
+            self.pushed_task_ids.append(task_data["task_id"])
+            return super().push(task_data, sync_state)
+
+    cal_sync = _sync("task_engine_mixed_cal", target="apple_calendar")
+    rem_sync = _sync("task_engine_mixed_rem", target="apple_reminder")
+    adapter = TrackingCalendarAdapter()
+
+    result = SyncEngine(adapters=[adapter]).scan_once()
+
+    # Only the calendar record should be picked
+    assert result.pending_picked == 1
+
+    # Calendar: picked → adapter push → synced
+    cal_state = get_sync_state(cal_sync["sync_id"])
+    assert cal_state["sync_status"] == "synced"
+    cal_logs = _logs(cal_sync["sync_id"])
+    assert len(cal_logs) == 1
+    assert cal_logs[0]["sync_result"] == "success"
+
+    # Reminder: not picked, stays pending, no logs, no adapter call
+    rem_state = get_sync_state(rem_sync["sync_id"])
+    assert rem_state["sync_status"] == "pending"
+    rem_logs = _logs(rem_sync["sync_id"])
+    assert len(rem_logs) == 0
+
+    # Adapter only called for calendar, not reminder
+    assert adapter.push_count == 1
+    assert adapter.pushed_task_ids == ["task_engine_mixed_cal"]
 
 
 # ── Phase 23 — Sync state consistency hardening ──────────────────────────
