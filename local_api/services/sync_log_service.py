@@ -47,10 +47,28 @@ def create_sync_log(
     redacted_error_message = REDACTED_ERROR_MESSAGE if error_message is not None else None
 
     sync = conn.execute(
-        "SELECT sync_id FROM sync_state WHERE sync_id = ?", (sync_id,)
+        "SELECT sync_id, task_id, sync_target FROM sync_state WHERE sync_id = ?", (sync_id,)
     ).fetchone()
     if sync is None:
         raise ValueError(f"Sync state not found: {sync_id}")
+
+    # Phase 28: Validate sync_log consistency with referenced sync_state
+    if sync["sync_target"] != sync_target:
+        raise ValueError(
+            f"sync_target mismatch: input '{sync_target}' does not match "
+            f"sync_state.sync_target '{sync['sync_target']}'"
+        )
+    if local_task_id is not None and local_task_id != sync["task_id"]:
+        raise ValueError(
+            f"local_task_id mismatch: input '{local_task_id}' does not match "
+            f"sync_state.task_id '{sync['task_id']}'"
+        )
+
+    # Phase 28: Require error_code when sync_result is "failed"
+    if sync_result == "failed" and not error_code:
+        raise ValueError(
+            "error_code is required when sync_result is 'failed'"
+        )
 
     try:
         conn.execute(

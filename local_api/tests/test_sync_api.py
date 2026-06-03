@@ -399,12 +399,19 @@ class TestCreateSyncLog:
         assert data["log_id"].startswith("log_")
 
     def test_create_full(self):
-        sync_id = self._create_sync_state()
+        # Create task + sync_state inline to capture real task_id
+        task_id = _create_task()
+        resp = client.post(
+            "/api/sync/state",
+            json={"task_id": task_id, "sync_target": "apple_reminder"},
+            headers=AUTH_HEADER,
+        )
+        sync_id = resp.json()["sync_id"]
         resp = client.post(
             "/api/sync/logs",
             json={
                 "sync_id": sync_id,
-                "local_task_id": "task_001",
+                "local_task_id": task_id,
                 "sync_target": "apple_reminder",
                 "sync_attempt": 3,
                 "sync_result": "failed",
@@ -462,6 +469,7 @@ class TestCreateSyncLog:
                 "sync_id": sync_id,
                 "sync_target": "apple_calendar",
                 "sync_result": "failed",
+                "error_code": "ERR_REDACT_TEST",
                 "error_message": "User typed private meeting title",
             },
             headers=AUTH_HEADER,
@@ -470,6 +478,82 @@ class TestCreateSyncLog:
         data = resp.json()
         assert data["error_message"] == "REDACTED"
         assert "private meeting title" not in str(data)
+
+    # ── Phase 28: sync_log consistency validations ────────────────────────
+
+    def test_rejects_sync_target_mismatch(self):
+        """API rejects sync_target inconsistent with sync_state.sync_target."""
+        sync_id = self._create_sync_state()  # creates with apple_calendar
+        resp = client.post(
+            "/api/sync/logs",
+            json={
+                "sync_id": sync_id,
+                "sync_target": "apple_reminder",
+                "sync_result": "success",
+            },
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 422
+        assert "sync_target mismatch" in resp.json()["detail"]
+
+    def test_rejects_local_task_id_mismatch(self):
+        """API rejects local_task_id inconsistent with sync_state.task_id."""
+        sync_id = self._create_sync_state()
+        resp = client.post(
+            "/api/sync/logs",
+            json={
+                "sync_id": sync_id,
+                "sync_target": "apple_calendar",
+                "sync_result": "success",
+                "local_task_id": "wrong_task_id",
+            },
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 422
+        assert "local_task_id mismatch" in resp.json()["detail"]
+
+    def test_rejects_failed_without_error_code(self):
+        """API rejects sync_result='failed' without error_code."""
+        sync_id = self._create_sync_state()
+        resp = client.post(
+            "/api/sync/logs",
+            json={
+                "sync_id": sync_id,
+                "sync_target": "apple_calendar",
+                "sync_result": "failed",
+            },
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 422
+        assert "error_code is required" in resp.json()["detail"]
+
+    def test_success_log_without_error_code_ok(self):
+        """Success logs without error_code are valid."""
+        sync_id = self._create_sync_state()
+        resp = client.post(
+            "/api/sync/logs",
+            json={
+                "sync_id": sync_id,
+                "sync_target": "apple_calendar",
+                "sync_result": "success",
+            },
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 201
+
+    def test_drift_log_without_error_code_ok(self):
+        """Drift-detected logs without error_code are valid."""
+        sync_id = self._create_sync_state()
+        resp = client.post(
+            "/api/sync/logs",
+            json={
+                "sync_id": sync_id,
+                "sync_target": "apple_calendar",
+                "sync_result": "drift_detected",
+            },
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 201
 
 
 class TestGetSyncLog:
@@ -523,7 +607,7 @@ class TestListSyncLogs:
         )
         client.post(
             "/api/sync/logs",
-            json={"sync_id": sync_id, "sync_target": "apple_calendar", "sync_result": "failed"},
+            json={"sync_id": sync_id, "sync_target": "apple_calendar", "sync_result": "failed", "error_code": "test_failure"},
             headers=AUTH_HEADER,
         )
         resp = client.get("/api/sync/logs", headers=AUTH_HEADER)

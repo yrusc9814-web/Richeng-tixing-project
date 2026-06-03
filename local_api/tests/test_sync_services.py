@@ -289,10 +289,76 @@ class TestSyncLogService:
             sync_id=sync["sync_id"],
             sync_target="apple_calendar",
             sync_result="failed",
+            error_code="test_redact",
             error_message="User typed private meeting title",
         )
         assert record["error_message"] == "REDACTED"
         assert "private meeting title" not in str(record)
+
+    # ── Phase 28: sync_log consistency validations ────────────────────────
+
+    def test_rejects_sync_target_mismatch(self):
+        """Service rejects sync_target inconsistent with sync_state.sync_target."""
+        sync = self._create_sync_record("task_log_target_mismatch")
+        with pytest.raises(ValueError, match="sync_target mismatch"):
+            create_sync_log(
+                sync_id=sync["sync_id"],
+                sync_target="apple_reminder",
+                sync_result="success",
+            )
+
+    def test_rejects_local_task_id_mismatch(self):
+        """Service rejects local_task_id inconsistent with sync_state.task_id."""
+        sync = self._create_sync_record("task_log_taskid_mismatch")
+        with pytest.raises(ValueError, match="local_task_id mismatch"):
+            create_sync_log(
+                sync_id=sync["sync_id"],
+                local_task_id="wrong_task_id",
+                sync_target="apple_calendar",
+                sync_result="success",
+            )
+
+    def test_rejects_failed_without_error_code(self):
+        """Service rejects sync_result='failed' without error_code."""
+        sync = self._create_sync_record("task_log_no_error_code")
+        with pytest.raises(ValueError, match="error_code is required"):
+            create_sync_log(
+                sync_id=sync["sync_id"],
+                sync_target="apple_calendar",
+                sync_result="failed",
+            )
+
+    def test_success_log_without_error_code_ok(self):
+        """Success logs without error_code pass validation."""
+        sync = self._create_sync_record("task_log_success_no_ec")
+        record = create_sync_log(
+            sync_id=sync["sync_id"],
+            sync_target="apple_calendar",
+            sync_result="success",
+        )
+        assert record["sync_result"] == "success"
+
+    def test_drift_log_without_error_code_ok(self):
+        """Drift-detected logs without error_code pass validation."""
+        sync = self._create_sync_record("task_log_drift_no_ec")
+        record = create_sync_log(
+            sync_id=sync["sync_id"],
+            sync_target="apple_calendar",
+            sync_result="drift_detected",
+        )
+        assert record["sync_result"] == "drift_detected"
+
+    def test_failed_log_with_error_code_ok(self):
+        """Failed logs with error_code pass validation."""
+        sync = self._create_sync_record("task_log_failed_with_ec")
+        record = create_sync_log(
+            sync_id=sync["sync_id"],
+            sync_target="apple_calendar",
+            sync_result="failed",
+            error_code="test_failure",
+        )
+        assert record["sync_result"] == "failed"
+        assert record["error_code"] == "test_failure"
 
     def test_get_sync_log(self):
         sync = self._create_sync_record("task_log_05")
@@ -320,6 +386,7 @@ class TestSyncLogService:
             sync_id=sync["sync_id"],
             sync_target="apple_calendar",
             sync_result="failed",
+            error_code="test_list",
         )
         records, total = list_sync_logs()
         assert total >= 2
