@@ -997,3 +997,107 @@ def test_pending_no_time_at_push_goes_failed_permanent_without_adapter_call():
     assert len(logs) == 1
     assert logs[0]["sync_result"] == "failed"
     assert logs[0]["error_code"] == "missing_time"
+
+
+# ── Phase 30 — Calendar success requires durable external_id ──────────────
+
+
+class MockSuccessNoExternalIdAdapter(MockAppleAdapter):
+    """Adapter that returns success=True but external_id=None (simulating a
+    buggy or misconfigured adapter that reports success without a durable id)."""
+
+    def push(self, task_data: dict, sync_state: dict) -> AdapterResult:
+        return AdapterResult(
+            success=True,
+            external_id=None,
+            sync_result="success",
+        )
+
+
+def test_queued_new_calendar_success_without_external_id_fails_permanent():
+    """Queued engine: success without external_id for new/pending Calendar
+    does not mark synced; transitions failed_permanent; failed log
+    missing_external_id; no payload_hash; no last_synced_at."""
+    sync = _sync("task_engine_p30_noext")
+
+    engine = SyncEngine(adapters=[MockSuccessNoExternalIdAdapter()])
+    result = engine.scan_once()
+
+    assert result.pending_picked == 1
+
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "failed_permanent"
+    assert state["external_id"] is None
+    assert state["payload_hash"] is None
+    assert state["last_synced_at"] is None
+
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["sync_result"] == "failed"
+    assert logs[0]["error_code"] == "missing_external_id"
+    assert logs[0]["triggered_by"] == "sync_engine"
+    # Success log fields must not be present
+    assert logs[0].get("payload_hash_before") is None
+    assert logs[0].get("payload_hash_after") is None
+    assert logs[0].get("external_id_before") is None
+    assert logs[0].get("external_id_after") is None
+
+
+def test_queued_stale_update_existing_external_id_preserved_when_adapter_returns_none():
+    """Queued engine: stale/update path with existing external_id and adapter
+    success external_id=None preserves existing external_id; marks synced;
+    success log external_id_after is existing id."""
+    sync = _sync("task_engine_p30_stale_preserve", status="synced")
+    update_sync_state(
+        sync["sync_id"],
+        external_id="ext_engine_p30_preserve",
+        payload_hash="old_hash_engine_p30",
+    )
+    transition_sync_state(sync["sync_id"], "stale", trigger="trigger")
+
+    engine = SyncEngine(adapters=[MockSuccessNoExternalIdAdapter()])
+
+    # First scan: stale → pending
+    stale_result = engine.scan_once()
+    assert stale_result.stale_triggered == 1
+
+    # Second scan: pending → push → synced (with preserved external_id)
+    push_result = engine.scan_once()
+    assert push_result.pending_picked == 1
+
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "synced"
+    assert state["external_id"] == "ext_engine_p30_preserve"
+    assert state["payload_hash"] is not None
+    assert state["last_synced_at"] is not None
+
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["sync_result"] == "success"
+    assert logs[0]["external_id_before"] == "ext_engine_p30_preserve"
+    assert logs[0]["external_id_after"] == "ext_engine_p30_preserve"
+    assert logs[0]["triggered_by"] == "sync_engine"
+
+
+def test_queued_missing_external_id_uses_max_plus_one_attempt():
+    """Queued missing_external_id log must use max(sync_attempt)+1 semantics."""
+    sync = _sync("task_engine_p30_attempt")
+    create_sync_log(
+        sync_id=sync["sync_id"],
+        local_task_id=sync["task_id"],
+        sync_target=sync["sync_target"],
+        sync_attempt=2,
+        sync_result="failed",
+        error_code="previous_failure",
+        triggered_by="test",
+    )
+
+    engine = SyncEngine(adapters=[MockSuccessNoExternalIdAdapter()])
+    engine.scan_once()
+
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "failed_permanent"
+
+    logs = _logs(sync["sync_id"])
+    assert [log["sync_attempt"] for log in logs] == [3, 2]
+    assert logs[0]["error_code"] == "missing_external_id"

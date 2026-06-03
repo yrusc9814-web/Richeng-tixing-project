@@ -319,6 +319,29 @@ class SyncService:
             external_id_before = sync_state.get("external_id")
             external_id_after = push_result.external_id
 
+            # Phase 30: Calendar success must require durable external_id.
+            # Preserve existing external_id when adapter returns None/empty
+            # (update/stale path), and fail permanently if no final id is
+            # available — a synced Calendar record without external_id can
+            # bypass update semantics and create duplicate Apple Calendar events.
+            if not external_id_after and external_id_before:
+                external_id_after = external_id_before
+
+            if sync_target == "apple_calendar" and not external_id_after:
+                _transition_to_failed_permanent(sync_id)
+                _log_failure(
+                    sync_id, task_id, sync_target,
+                    attempt=attempt,
+                    code="missing_external_id",
+                    message="Calendar push succeeded but returned no external_id",
+                )
+                return _error_result(
+                    sync_id=sync_id,
+                    status="failed_permanent",
+                    code="missing_external_id",
+                    message="Calendar push succeeded but returned no external_id",
+                )
+
             # Phase 23: Write success metadata while state is still
             # in_progress.  Only transition to synced after the metadata
             # write succeeds, so a DB failure cannot leave a synced record
@@ -386,7 +409,7 @@ class SyncService:
                 "success": True,
                 "sync_id": sync_id,
                 "sync_status": "synced",
-                "external_id": push_result.external_id,
+                "external_id": external_id_after,
                 "error_code": None,
                 "error_message": None,
             }

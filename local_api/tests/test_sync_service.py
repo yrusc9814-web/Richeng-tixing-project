@@ -1373,3 +1373,129 @@ class TestDirectSyncPrePushFailureConsistency:
         # Verify DB actually shows in_progress
         persisted = get_sync_state(state["sync_id"])
         assert persisted["sync_status"] == "in_progress"
+
+
+# ── Phase 30 — Calendar success requires durable external_id ────────────
+
+
+class MockSuccessNoExternalIdAdapter(SyncAdapter):
+    """Adapter that returns success=True but external_id=None (simulating a
+    buggy or misconfigured adapter that reports success without a durable id)."""
+
+    @property
+    def target_name(self) -> str:
+        return "apple_calendar"
+
+    def validate_config(self) -> tuple[bool, Optional[str]]:
+        return (True, None)
+
+    def push(self, task_data: dict, sync_state: dict) -> AdapterResult:
+        return AdapterResult(
+            success=True,
+            external_id=None,
+            sync_result="success",
+        )
+
+    def pull(self, external_id: str) -> Optional[dict]:
+        return None
+
+
+class TestPhase30MissingExternalId:
+    """Phase 30: Calendar success must require durable external_id."""
+
+    def test_new_pending_calendar_success_without_external_id_fails_permanent(self):
+        """Direct service: success without external_id for new/pending Calendar
+        does not mark synced, transitions failed_permanent, writes one failed
+        log with error_code='missing_external_id', no payload_hash, no
+        last_synced_at."""
+        _insert_task("task_p30_noext_new", sync_enabled=1)
+        svc = SyncService(adapters=[MockSuccessNoExternalIdAdapter()])
+
+        result = svc.run_task_sync("task_p30_noext_new", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "failed_permanent"
+        assert result["error_code"] == "missing_external_id"
+        assert result["external_id"] is None
+
+        # State must be failed_permanent with no success metadata
+        state = get_sync_state(result["sync_id"])
+        assert state is not None
+        assert state["sync_status"] == "failed_permanent"
+        assert state["external_id"] is None
+        assert state["payload_hash"] is None
+        assert state["last_synced_at"] is None
+
+        # Exactly one failed log with missing_external_id
+        logs = _logs(result["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "missing_external_id"
+        assert logs[0]["triggered_by"] == "sync_service"
+        # Success log fields must not be present
+        assert logs[0].get("payload_hash_before") is None
+        assert logs[0].get("payload_hash_after") is None
+        assert logs[0].get("external_id_before") is None
+        assert logs[0].get("external_id_after") is None
+
+    def test_stale_update_existing_external_id_preserved_when_adapter_returns_none(self):
+        """Direct service: stale/update path with existing external_id and
+        adapter success external_id=None preserves existing external_id; marks
+        synced; success log external_id_after is existing id."""
+        _insert_task("task_p30_stale_preserve", sync_enabled=1)
+        state = create_sync_state(
+            "task_p30_stale_preserve", "apple_calendar", sync_status="synced"
+        )
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_p30_preserve_me",
+            payload_hash="old_hash_p30",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+        transition_sync_state(state["sync_id"], "stale", trigger="trigger")
+
+        svc = SyncService(adapters=[MockSuccessNoExternalIdAdapter()])
+
+        result = svc.run_task_sync("task_p30_stale_preserve", "apple_calendar")
+
+        assert result["success"] is True
+        assert result["sync_status"] == "synced"
+        assert result["external_id"] == "ext_p30_preserve_me"
+
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "synced"
+        assert persisted["external_id"] == "ext_p30_preserve_me"
+        assert persisted["payload_hash"] is not None
+        assert persisted["last_synced_at"] is not None
+
+        # Success log must show external_id_after as preserved id
+        logs = _logs(state["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "success"
+        assert logs[0]["external_id_before"] == "ext_p30_preserve_me"
+        assert logs[0]["external_id_after"] == "ext_p30_preserve_me"
+        assert logs[0]["triggered_by"] == "sync_service"
+
+    def test_pending_without_external_id_uses_max_plus_one_attempt(self):
+        """missing_external_id log must use max(sync_attempt)+1 semantics,
+        consistent with other direct-sync failure paths."""
+        _insert_task("task_p30_attempt", sync_enabled=1)
+        state = create_sync_state("task_p30_attempt", "apple_calendar")
+        create_sync_log(
+            sync_id=state["sync_id"],
+            local_task_id=state["task_id"],
+            sync_target=state["sync_target"],
+            sync_attempt=2,
+            sync_result="failed",
+            error_code="previous_failure",
+            triggered_by="test",
+        )
+
+        svc = SyncService(adapters=[MockSuccessNoExternalIdAdapter()])
+        result = svc.run_task_sync("task_p30_attempt", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["error_code"] == "missing_external_id"
+        logs = _logs(state["sync_id"])
+        assert [log["sync_attempt"] for log in logs] == [3, 2]
+        assert logs[0]["error_code"] == "missing_external_id"

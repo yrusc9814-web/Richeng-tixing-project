@@ -406,6 +406,32 @@ class SyncEngine:
                     external_id_before = current.get("external_id")
                     external_id_after = push_result.external_id
 
+                    # Phase 30: Calendar success must require durable
+                    # external_id.  Preserve existing external_id when
+                    # adapter returns None/empty (update/stale path), and
+                    # fail permanently if no final id is available.
+                    if not external_id_after and external_id_before:
+                        external_id_after = external_id_before
+
+                    if sync_target == "apple_calendar" and not external_id_after:
+                        transition_sync_state(
+                            sync_id, "failed_permanent", trigger="engine"
+                        )
+                        create_sync_log(
+                            sync_id=sync_id,
+                            local_task_id=task_id,
+                            sync_target=sync_target,
+                            sync_attempt=attempt,
+                            sync_result="failed",
+                            error_code="missing_external_id",
+                            error_message=(
+                                "Calendar push succeeded but returned "
+                                "no external_id"
+                            ),
+                            triggered_by="sync_engine",
+                        )
+                        continue
+
                     # Phase 23: Write success metadata while state is still
                     # in_progress.  Only transition to synced after the
                     # metadata write succeeds, so a DB failure cannot leave
