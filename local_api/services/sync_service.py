@@ -375,36 +375,97 @@ class SyncService:
                     message=str(metadata_exc),
                 )
 
-            transitioned, transition_error = _safe_transition(
-                sync_id, "synced", trigger="engine"
-            )
-            if transitioned is None:
+            # Phase 31: Create success log BEFORE synced transition so a
+            # success log write failure cannot leave sync_state=synced
+            # without a matching success log.  Treat metadata update +
+            # success log recording + synced transition as one required
+            # local finalization step.
+            try:
+                create_sync_log(
+                    sync_id=sync_id,
+                    local_task_id=task_id,
+                    sync_target=sync_target,
+                    sync_attempt=attempt,
+                    sync_result="success",
+                    payload_hash_before=payload_hash_before,
+                    payload_hash_after=payload_hash_after,
+                    external_id_before=external_id_before,
+                    external_id_after=external_id_after,
+                    triggered_by="sync_service",
+                )
+            except Exception as log_exc:
+                logger.exception(
+                    "Success log finalization failed for %s: %s",
+                    sync_id,
+                    log_exc,
+                )
+                _safe_transition(sync_id, "failed", trigger="engine")
                 _log_failure(
                     sync_id,
                     task_id,
                     sync_target,
                     attempt=attempt,
-                    code="invalid_transition",
-                    message=str(transition_error),
+                    code="success_finalize_failed",
+                    message=str(log_exc),
+                )
+                return _error_result(
+                    sync_id=sync_id,
+                    status="failed",
+                    code="success_finalize_failed",
+                    message=str(log_exc),
+                )
+
+            transitioned, transition_error = _safe_transition(
+                sync_id, "synced", trigger="engine"
+            )
+            if transitioned is None:
+                # Phase 31: synced transition failed after success log
+                # was committed.  Delete the orphaned success log so we
+                # don't leave a success log without synced state.
+                cleanup_ok = True
+                try:
+                    _delete_success_log(sync_id, attempt)
+                except Exception:
+                    logger.exception(
+                        "Failed to clean up orphaned success log "
+                        "for %s attempt %d",
+                        sync_id,
+                        attempt,
+                    )
+                    cleanup_ok = False
+
+                if not cleanup_ok:
+                    # Phase 31: orphan success log cleanup itself failed.
+                    # State is inconsistent — do NOT claim consistency
+                    # was restored.
+                    code = "orphan_success_log_cleanup_failed"
+                    msg = (
+                        "synced transition failed and orphan success log "
+                        "cleanup also failed: " + str(transition_error)
+                    )
+                else:
+                    code = "success_finalize_failed"
+                    msg = (
+                        "synced transition failed after success log: "
+                        + str(transition_error)
+                    )
+
+                _log_failure(
+                    sync_id,
+                    task_id,
+                    sync_target,
+                    attempt=attempt,
+                    code=code,
+                    message=msg,
                 )
                 current = get_sync_state_by_key(task_id, sync_target)
                 return _error_result(
                     sync_id=sync_id,
                     status=current.get("sync_status") if current else "failed",
-                    code="invalid_transition",
-                    message=str(transition_error),
+                    code=code,
+                    message=msg,
                     external_id=sync_state.get("external_id"),
                 )
-            _log_sync(
-                sync_id,
-                task_id,
-                sync_target,
-                attempt,
-                payload_hash_before=payload_hash_before,
-                payload_hash_after=payload_hash_after,
-                external_id_before=external_id_before,
-                external_id_after=external_id_after,
-            )
             return {
                 "success": True,
                 "sync_id": sync_id,
@@ -511,31 +572,19 @@ def _transition_to_failed_permanent(sync_id: str) -> Optional[dict]:
     return None
 
 
-def _log_sync(
-    sync_id: str,
-    task_id: str,
-    target: str,
-    attempt: int,
-    payload_hash_before: Optional[str] = None,
-    payload_hash_after: Optional[str] = None,
-    external_id_before: Optional[str] = None,
-    external_id_after: Optional[str] = None,
-) -> None:
-    try:
-        create_sync_log(
-            sync_id=sync_id,
-            local_task_id=task_id,
-            sync_target=target,
-            sync_attempt=attempt,
-            sync_result="success",
-            payload_hash_before=payload_hash_before,
-            payload_hash_after=payload_hash_after,
-            external_id_before=external_id_before,
-            external_id_after=external_id_after,
-            triggered_by="sync_service",
-        )
-    except Exception as exc:
-        logger.warning("Could not write sync_log for %s: %s", sync_id, exc)
+def _delete_success_log(sync_id: str, attempt: int) -> None:
+    """Delete an orphaned success log entry after a failed synced transition.
+
+    Extracted as a standalone helper so tests can monkeypatch it without
+    touching sqlite3.Connection.execute (which is read-only in C).
+    """
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM sync_logs WHERE sync_id = ? "
+        "AND sync_attempt = ? AND sync_result = 'success'",
+        (sync_id, attempt),
+    )
+    conn.commit()
 
 
 def _log_failure(

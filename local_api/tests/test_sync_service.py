@@ -222,6 +222,13 @@ class TestRunTaskSyncSuccess:
         assert result["external_id"] == "ext_abc123"
         assert result["sync_id"] is not None
 
+        # Phase 31: verify success finalization persisted metadata
+        state = get_sync_state(result["sync_id"])
+        assert state is not None
+        assert state["payload_hash"] is not None
+        assert len(state["payload_hash"]) == 64
+        assert state["last_synced_at"] is not None
+
     def test_creates_sync_state_and_persists(self):
         _insert_task("task_svc_002", sync_enabled=1)
         svc = SyncService(adapters=[MockSuccessAdapter()])
@@ -233,6 +240,10 @@ class TestRunTaskSyncSuccess:
         assert record is not None
         assert record["sync_status"] == "synced"
         assert record["external_id"] == "ext_abc123"
+        # Phase 31: verify success finalization persisted metadata
+        assert record["payload_hash"] is not None
+        assert len(record["payload_hash"]) == 64
+        assert record["last_synced_at"] is not None
 
     def test_writes_sync_log_on_success(self):
         _insert_task("task_svc_003", sync_enabled=1)
@@ -1111,7 +1122,7 @@ class TestMetadataWriteFailure:
 
     def test_success_writes_metadata_before_synced_transition(self, monkeypatch):
         """Metadata (payload_hash, external_id) must be written BEFORE
-        the synced transition, and success log after both."""
+        the success log and synced transition."""
         _insert_task("task_svc_order", sync_enabled=1)
 
         write_order = []
@@ -1127,29 +1138,30 @@ class TestMetadataWriteFailure:
 
         monkeypatch.setattr(sss_mod, "update_sync_state", _tracked_update)
 
-        # _log_sync is a module-level function in sync_service
+        # create_sync_log is imported directly by sync_service at module level,
+        # so we must patch the attribute on sync_service, not on sync_log_service.
         from local_api.services import sync_service as svc_mod
 
-        real_log_sync = svc_mod._log_sync
+        real_create = svc_mod.create_sync_log
 
-        def _tracked_log_sync(*args, **kwargs):
-            write_order.append("_log_sync")
-            return real_log_sync(*args, **kwargs)
+        def _tracked_create(*args, **kwargs):
+            write_order.append("create_sync_log")
+            return real_create(*args, **kwargs)
 
-        monkeypatch.setattr(svc_mod, "_log_sync", _tracked_log_sync)
+        monkeypatch.setattr(svc_mod, "create_sync_log", _tracked_create)
 
         svc = SyncService(adapters=[MockSuccessAdapter()])
         result = svc.run_task_sync("task_svc_order", "apple_calendar")
 
         assert result["success"] is True
         assert "update_sync_state" in write_order
-        assert "_log_sync" in write_order
+        assert "create_sync_log" in write_order
 
-        # update_sync_state must happen before _log_sync
+        # update_sync_state must happen before create_sync_log
         update_idx = write_order.index("update_sync_state")
-        log_idx = write_order.index("_log_sync")
+        log_idx = write_order.index("create_sync_log")
         assert update_idx < log_idx, (
-            f"Expected update_sync_state before _log_sync, got: {write_order}"
+            f"Expected update_sync_state before create_sync_log, got: {write_order}"
         )
 
         state = get_sync_state(result["sync_id"])
@@ -1499,3 +1511,224 @@ class TestPhase30MissingExternalId:
         logs = _logs(state["sync_id"])
         assert [log["sync_attempt"] for log in logs] == [3, 2]
         assert logs[0]["error_code"] == "missing_external_id"
+
+
+# ── Phase 31 — Success finalization consistency ─────────────────────────
+
+
+class TestPhase31SuccessFinalization:
+    """Success log finalization failure must not leave sync_state=synced
+    without a matching success log."""
+
+    def test_success_log_finalization_failure_does_not_leave_synced(self, monkeypatch):
+        """If success log creation raises, direct sync must:
+        - not return success
+        - not leave sync_state=synced
+        - not write a success log
+        - write a failed log with error_code='success_finalize_failed'
+        - leave state as failed (rolled back from in_progress)
+        """
+        _insert_task("task_p31_finalize_fail", sync_enabled=1)
+
+        # create_sync_log is imported directly by sync_service at module level,
+        # so we must patch the attribute on sync_service, not on sync_log_service.
+        from local_api.services import sync_service as svc_mod
+
+        real_create = svc_mod.create_sync_log
+
+        def _failing_create(*args, **kwargs):
+            if kwargs.get("sync_result") == "success":
+                raise RuntimeError("Simulated log write failure")
+            return real_create(*args, **kwargs)
+
+        monkeypatch.setattr(svc_mod, "create_sync_log", _failing_create)
+
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+        result = svc.run_task_sync("task_p31_finalize_fail", "apple_calendar")
+
+        # Must NOT report success
+        assert result["success"] is False
+        assert result["error_code"] == "success_finalize_failed"
+        assert result["sync_status"] == "failed"
+
+        # DB state must NOT be synced
+        state = get_sync_state(result["sync_id"])
+        assert state is not None
+        assert state["sync_status"] == "failed"
+
+        # No success log must exist
+        logs = _logs(result["sync_id"])
+        success_logs = [log for log in logs if log["sync_result"] == "success"]
+        assert len(success_logs) == 0, (
+            "Success log must not exist when finalization fails"
+        )
+
+        # A failed log with success_finalize_failed must exist
+        failed_logs = [log for log in logs if log["sync_result"] == "failed"]
+        assert len(failed_logs) >= 1
+        assert failed_logs[0]["error_code"] == "success_finalize_failed"
+
+    def test_synced_transition_failure_cleans_up_orphaned_success_log(
+        self, monkeypatch
+    ):
+        """If _safe_transition(sync_id, 'synced') fails after metadata +
+        success log have been committed, direct sync must:
+        - not return success
+        - not leave sync_state=synced
+        - delete the orphaned success log (no success log remains)
+        - write a failed log with error_code='success_finalize_failed'
+        - leave state as in_progress (transition to synced failed)
+        """
+        _insert_task("task_p31_transition_fail", sync_enabled=1)
+
+        from local_api.services import sync_service as svc_mod
+
+        real_safe_transition = svc_mod._safe_transition
+
+        def _failing_transition(sync_id, to_status, trigger="service"):
+            if to_status == "synced":
+                return None, RuntimeError(
+                    "Simulated synced transition failure"
+                )
+            return real_safe_transition(sync_id, to_status, trigger=trigger)
+
+        monkeypatch.setattr(
+            svc_mod, "_safe_transition", _failing_transition
+        )
+
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+        result = svc.run_task_sync(
+            "task_p31_transition_fail", "apple_calendar"
+        )
+
+        # Must NOT report success
+        assert result["success"] is False
+        assert result["error_code"] == "success_finalize_failed"
+        assert "synced transition failed" in result["error_message"]
+
+        # DB state must NOT be synced
+        state = get_sync_state(result["sync_id"])
+        assert state is not None
+        assert state["sync_status"] != "synced"
+
+        # No success log must remain (orphaned log was cleaned up)
+        logs = _logs(result["sync_id"])
+        success_logs = [log for log in logs if log["sync_result"] == "success"]
+        assert len(success_logs) == 0, (
+            "Orphaned success log must be deleted when synced "
+            "transition fails"
+        )
+
+        # A failed log with success_finalize_failed must exist
+        failed_logs = [log for log in logs if log["sync_result"] == "failed"]
+        assert len(failed_logs) >= 1
+        assert failed_logs[0]["error_code"] == "success_finalize_failed"
+
+    def test_synced_transition_failure_cleanup_delete_itself_fails(
+        self, monkeypatch
+    ):
+        """If the orphaned success log cleanup DELETE itself fails,
+        direct sync must NOT claim consistency is restored:
+        - error_code must be 'orphan_success_log_cleanup_failed'
+        - must not return success
+        - must not leave sync_state=synced
+        """
+        _insert_task("task_p31_cleanup_fail", sync_enabled=1)
+
+        from local_api.services import sync_service as svc_mod
+
+        # Mock _safe_transition to fail on synced (same as existing test)
+        real_safe_transition = svc_mod._safe_transition
+
+        def _failing_transition(sync_id, to_status, trigger="service"):
+            if to_status == "synced":
+                return None, RuntimeError(
+                    "Simulated synced transition failure"
+                )
+            return real_safe_transition(sync_id, to_status, trigger=trigger)
+
+        monkeypatch.setattr(
+            svc_mod, "_safe_transition", _failing_transition
+        )
+
+        # Make the cleanup DELETE fail — patch the standalone helper
+        # _delete_success_log instead of sqlite3.Connection.execute
+        # (which is read-only in C and cannot be monkeypatched).
+        def _failing_delete(sync_id, attempt):
+            raise RuntimeError("Simulated cleanup DELETE failure")
+
+        monkeypatch.setattr(
+            svc_mod, "_delete_success_log", _failing_delete
+        )
+
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+        result = svc.run_task_sync(
+            "task_p31_cleanup_fail", "apple_calendar"
+        )
+
+        # Must NOT report success
+        assert result["success"] is False
+
+        # Must use the cleanup-failed error code, NOT
+        # success_finalize_failed (which would claim consistency).
+        assert (
+            result["error_code"] == "orphan_success_log_cleanup_failed"
+        ), (
+            f"Expected 'orphan_success_log_cleanup_failed', "
+            f"got '{result['error_code']}'"
+        )
+        assert "cleanup also failed" in result["error_message"]
+
+        # DB state must NOT be synced
+        state = get_sync_state(result["sync_id"])
+        assert state is not None
+        assert state["sync_status"] != "synced"
+
+        # A failed log with orphan_success_log_cleanup_failed must exist
+        logs = _logs(result["sync_id"])
+        failed_logs = [log for log in logs if log["sync_result"] == "failed"]
+        assert len(failed_logs) >= 1
+        assert (
+            failed_logs[0]["error_code"]
+            == "orphan_success_log_cleanup_failed"
+        )
+
+    def test_success_finalization_persists_consistent_state(self):
+        """A healthy success path must persist:
+        - sync_state.sync_status == 'synced'
+        - non-empty external_id
+        - current payload_hash (64-char SHA-256)
+        - refreshed last_synced_at
+        - exactly one success sync_log
+        """
+        from local_api.sync_client.payload import compute_task_payload_hash
+
+        _insert_task("task_p31_healthy", sync_enabled=1)
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+
+        result = svc.run_task_sync("task_p31_healthy", "apple_calendar")
+
+        assert result["success"] is True
+        assert result["sync_status"] == "synced"
+        assert result["external_id"] == "ext_abc123"
+
+        state = get_sync_state(result["sync_id"])
+        assert state["sync_status"] == "synced"
+        assert state["external_id"] == "ext_abc123"
+        assert state["payload_hash"] is not None
+        assert len(state["payload_hash"]) == 64
+        assert state["last_synced_at"] is not None
+
+        # Verify payload_hash matches current task data
+        conn = get_db()
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ?", ("task_p31_healthy",)
+        ).fetchone()
+        expected_hash = compute_task_payload_hash(dict(task_row))
+        assert state["payload_hash"] == expected_hash
+
+        # Exactly one success log
+        logs = _logs(result["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "success"
+        assert logs[0]["triggered_by"] == "sync_service"

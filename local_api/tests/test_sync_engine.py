@@ -308,6 +308,11 @@ def test_pending_to_synced_through_adapter():
     assert result.pending_picked == 1
     state = get_sync_state(sync["sync_id"])
     assert state["sync_status"] == "synced"
+    assert state["external_id"] is not None
+    # Phase 31: verify success finalization persisted metadata
+    assert state["payload_hash"] is not None
+    assert len(state["payload_hash"]) == 64
+    assert state["last_synced_at"] is not None
     logs = _logs(sync["sync_id"])
     assert len(logs) == 1
     assert logs[0]["sync_result"] == "success"
@@ -1101,3 +1106,195 @@ def test_queued_missing_external_id_uses_max_plus_one_attempt():
     logs = _logs(sync["sync_id"])
     assert [log["sync_attempt"] for log in logs] == [3, 2]
     assert logs[0]["error_code"] == "missing_external_id"
+
+
+# ── Phase 31 — Success finalization consistency ────────────────────────────
+
+
+def test_success_log_finalization_failure_does_not_leave_synced(monkeypatch):
+    """Queued engine: if success log creation raises during adapter push
+    cycle, sync_state must not be synced, no success log must exist,
+    and a failure log with 'success_finalize_failed' must be written."""
+
+    sync = _sync("task_engine_p31_finalize_fail")
+
+    import local_api.sync_engine
+
+    real_create = local_api.sync_engine.create_sync_log
+
+    def _failing_create(*args, **kwargs):
+        if kwargs.get("sync_result") == "success":
+            raise RuntimeError("Simulated log write failure")
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(
+        local_api.sync_engine, "create_sync_log", _failing_create
+    )
+
+    engine = SyncEngine(adapters=_adapters())
+    result = engine.scan_once()
+
+    assert result.pending_picked == 1
+
+    # State must NOT be synced
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "failed", (
+        f"Expected 'failed', got '{state['sync_status']}'"
+    )
+
+    # No success log must exist
+    logs = _logs(sync["sync_id"])
+    success_logs = [log for log in logs if log["sync_result"] == "success"]
+    assert len(success_logs) == 0, (
+        "Success log must not exist when finalization fails"
+    )
+
+    # A failed log with success_finalize_failed must exist
+    failed_logs = [log for log in logs if log["sync_result"] == "failed"]
+    assert len(failed_logs) >= 1
+    assert failed_logs[0]["error_code"] == "success_finalize_failed"
+    assert failed_logs[0]["triggered_by"] == "sync_engine"
+
+
+def test_synced_transition_failure_cleans_up_orphaned_success_log(monkeypatch):
+    """Queued engine: if transition_sync_state to 'synced' raises after
+    metadata + success log have been committed, the engine must:
+    - not leave sync_state=synced
+    - delete the orphaned success log (no success log remains)
+    - write a failed log with error_code='success_finalize_failed'
+    - leave state as failed
+    """
+    sync = _sync("task_engine_p31_transition_fail")
+
+    import local_api.sync_engine
+
+    real_transition = local_api.sync_engine.transition_sync_state
+
+    def _failing_transition(sync_id, to_status, *, trigger="engine"):
+        if to_status == "synced":
+            raise ValueError("Simulated synced transition failure")
+        return real_transition(sync_id, to_status, trigger=trigger)
+
+    monkeypatch.setattr(
+        local_api.sync_engine, "transition_sync_state", _failing_transition
+    )
+
+    engine = SyncEngine(adapters=_adapters())
+    result = engine.scan_once()
+
+    assert result.pending_picked == 1
+
+    # State must NOT be synced
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] != "synced", (
+        f"Expected non-synced state, got '{state['sync_status']}'"
+    )
+
+    # No success log must remain (orphaned log was cleaned up)
+    logs = _logs(sync["sync_id"])
+    success_logs = [log for log in logs if log["sync_result"] == "success"]
+    assert len(success_logs) == 0, (
+        "Orphaned success log must be deleted when synced "
+        "transition fails"
+    )
+
+    # A failed log with success_finalize_failed must exist
+    failed_logs = [log for log in logs if log["sync_result"] == "failed"]
+    assert len(failed_logs) >= 1
+    assert failed_logs[0]["error_code"] == "success_finalize_failed"
+    assert failed_logs[0]["triggered_by"] == "sync_engine"
+
+
+def test_synced_transition_failure_cleanup_delete_itself_fails(monkeypatch):
+    """Queued engine: if the orphaned success log cleanup DELETE itself
+    fails, the engine must NOT claim consistency is restored:
+    - error_code must be 'orphan_success_log_cleanup_failed'
+    - state must not be synced
+    - no success log may remain? (Not guaranteed — cleanup failed.)
+    """
+    sync = _sync("task_engine_p31_cleanup_fail")
+
+    import local_api.sync_engine
+
+    # Mock transition_sync_state to raise on synced (same as existing test)
+    real_transition = local_api.sync_engine.transition_sync_state
+
+    def _failing_transition(sync_id, to_status, *, trigger="engine"):
+        if to_status == "synced":
+            raise ValueError("Simulated synced transition failure")
+        return real_transition(sync_id, to_status, trigger=trigger)
+
+    monkeypatch.setattr(
+        local_api.sync_engine, "transition_sync_state", _failing_transition
+    )
+
+    # Make the cleanup DELETE fail — patch the standalone helper
+    # _delete_success_log instead of sqlite3.Connection.execute
+    # (which is read-only in C and cannot be monkeypatched).
+    def _failing_delete(sync_id, attempt):
+        raise RuntimeError("Simulated cleanup DELETE failure")
+
+    monkeypatch.setattr(
+        local_api.sync_engine, "_delete_success_log", _failing_delete
+    )
+
+    engine = SyncEngine(adapters=_adapters())
+    result = engine.scan_once()
+
+    assert result.pending_picked == 1
+
+    # State must NOT be synced
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] != "synced", (
+        f"Expected non-synced state, got '{state['sync_status']}'"
+    )
+
+    # A failed log with orphan_success_log_cleanup_failed must exist
+    logs = _logs(sync["sync_id"])
+    failed_logs = [log for log in logs if log["sync_result"] == "failed"]
+    assert len(failed_logs) >= 1
+    assert (
+        failed_logs[0]["error_code"]
+        == "orphan_success_log_cleanup_failed"
+    ), (
+        f"Expected 'orphan_success_log_cleanup_failed', "
+        f"got '{failed_logs[0]['error_code']}'"
+    )
+    assert failed_logs[0]["triggered_by"] == "sync_engine"
+
+
+def test_queued_success_finalization_persists_consistent_state():
+    """A healthy queued success path must persist:
+    - sync_state.sync_status == 'synced'
+    - non-empty external_id
+    - current payload_hash (64-char SHA-256)
+    - refreshed last_synced_at
+    - exactly one success sync_log
+    """
+    sync = _sync("task_engine_p31_healthy")
+    engine = SyncEngine(adapters=_adapters())
+
+    result = engine.scan_once()
+
+    assert result.pending_picked == 1
+
+    state = get_sync_state(sync["sync_id"])
+    assert state["sync_status"] == "synced"
+    assert state["external_id"] is not None
+    assert state["payload_hash"] is not None
+    assert len(state["payload_hash"]) == 64
+    assert state["last_synced_at"] is not None
+
+    # Verify payload_hash matches current task data
+    conn = get_db()
+    task_row = conn.execute(
+        "SELECT * FROM tasks WHERE task_id = ?", (sync["task_id"],)
+    ).fetchone()
+    expected_hash = compute_task_payload_hash(dict(task_row))
+    assert state["payload_hash"] == expected_hash
+
+    # Exactly one success log
+    logs = _logs(sync["sync_id"])
+    assert len(logs) == 1
+    assert logs[0]["sync_result"] == "success"
+    assert logs[0]["triggered_by"] == "sync_engine"
