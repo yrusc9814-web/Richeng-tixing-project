@@ -23,6 +23,7 @@ from local_api.services.sync_state_service import (
     update_sync_state,
 )
 from local_api.services.sync_log_service import create_sync_log, list_sync_logs
+from local_api.sync_client.payload import compute_task_payload_hash
 
 
 # ── Mock adapters ─────────────────────────────────────────────────────
@@ -804,10 +805,17 @@ class TestSkippedConsistency:
         """run_task_sync with synced + external_id must NOT write a sync_log."""
         _insert_task("task_skip_001", sync_enabled=1)
         state = create_sync_state("task_skip_001", "apple_calendar", sync_status="synced")
+        # Compute matching payload_hash so the already-synced guard triggers
+        conn = get_db()
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ?", ("task_skip_001",)
+        ).fetchone()
+        current_hash = compute_task_payload_hash(dict(task_row))
         update_sync_state(
             state["sync_id"],
             external_id="ext_already_done",
             last_synced_at="2026-06-01T00:00:00",
+            payload_hash=current_hash,
         )
 
         svc = SyncService(adapters=[MockSuccessAdapter()])
@@ -826,10 +834,17 @@ class TestSkippedConsistency:
         """run_task_sync on an already synced record must keep status synced."""
         _insert_task("task_skip_002", sync_enabled=1)
         state = create_sync_state("task_skip_002", "apple_calendar", sync_status="synced")
+        # Compute matching payload_hash so the already-synced guard triggers
+        conn = get_db()
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ?", ("task_skip_002",)
+        ).fetchone()
+        current_hash = compute_task_payload_hash(dict(task_row))
         update_sync_state(
             state["sync_id"],
             external_id="ext_no_touch",
             last_synced_at="2026-06-01T00:00:00",
+            payload_hash=current_hash,
         )
 
         svc = SyncService(adapters=[MockSuccessAdapter()])
@@ -838,6 +853,111 @@ class TestSkippedConsistency:
         persisted = get_sync_state(state["sync_id"])
         assert persisted["sync_status"] == "synced"
         assert persisted["external_id"] == "ext_no_touch"
+
+    def test_hash_mismatch_triggers_resync_not_skip(self):
+        """When stored payload_hash differs from current task hash, the
+        already-synced guard must NOT short-circuit — the record must be
+        resynced (stale path)."""
+        _insert_task("task_skip_hash_mismatch", sync_enabled=1)
+        state = create_sync_state(
+            "task_skip_hash_mismatch", "apple_calendar", sync_status="synced"
+        )
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_hash_mismatch",
+            payload_hash="mismatched_fake_hash_0000000000000000000000000000000000000000",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+
+        adapter = CountingSuccessAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_skip_hash_mismatch", "apple_calendar")
+
+        # Must NOT be skipped — hash mismatch means resync
+        assert result["success"] is True
+        assert result["sync_status"] == "synced"
+        assert result["error_code"] is None
+        assert adapter.push_count == 1
+
+        # Verify payload_hash was refreshed to current task hash
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["payload_hash"] is not None
+        assert persisted["payload_hash"] != "mismatched_fake_hash_0000000000000000000000000000000000000000"
+        assert len(persisted["payload_hash"]) == 64
+
+        # Verify hash matches current task data
+        conn = get_db()
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ?", ("task_skip_hash_mismatch",)
+        ).fetchone()
+        expected = compute_task_payload_hash(dict(task_row))
+        assert persisted["payload_hash"] == expected
+
+    def test_missing_stored_hash_with_current_hash_triggers_repair(self):
+        """When stored payload_hash is None but current task hash exists,
+        the already-synced guard must NOT short-circuit — repair via resync."""
+
+        class PreservingUpdateAdapter(SyncAdapter):
+            """Adapter that preserves existing external_id for update semantics."""
+
+            @property
+            def target_name(self) -> str:
+                return "apple_calendar"
+
+            def validate_config(self) -> tuple[bool, Optional[str]]:
+                return (True, None)
+
+            def push(self, task_data: dict, sync_state: dict) -> AdapterResult:
+                external_id = sync_state.get("external_id")
+                if external_id:
+                    return AdapterResult(
+                        success=True,
+                        external_id=external_id,
+                        sync_result="success",
+                    )
+                return AdapterResult(
+                    success=True,
+                    external_id="ext_new_fallback",
+                    sync_result="success",
+                )
+
+            def pull(self, external_id: str) -> Optional[dict]:
+                return None
+
+        _insert_task("task_skip_missing_hash", sync_enabled=1)
+        state = create_sync_state(
+            "task_skip_missing_hash", "apple_calendar", sync_status="synced"
+        )
+        # Set external_id and last_synced_at but NOT payload_hash
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_missing_hash",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+
+        adapter = PreservingUpdateAdapter()
+        svc = SyncService(adapters=[adapter])
+
+        result = svc.run_task_sync("task_skip_missing_hash", "apple_calendar")
+
+        # Must NOT be skipped — missing stored hash means repair via resync
+        assert result["success"] is True
+        assert result["sync_status"] == "synced"
+        assert result["error_code"] is None
+
+        # Verify payload_hash was populated from current task data
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["payload_hash"] is not None
+        assert len(persisted["payload_hash"]) == 64
+        assert persisted["external_id"] == "ext_missing_hash"
+
+        conn = get_db()
+        task_row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ?", ("task_skip_missing_hash",)
+        ).fetchone()
+        expected = compute_task_payload_hash(dict(task_row))
+        assert persisted["payload_hash"] == expected
 
 
 # ── Phase 21 — Payload hash / drift wiring ─────────────────────────────

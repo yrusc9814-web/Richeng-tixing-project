@@ -468,6 +468,13 @@ def test_stale_repush_preserves_existing_external_id_for_calendar_update():
     state = get_sync_state(sync["sync_id"])
     assert state["sync_status"] == "synced"
     assert state["external_id"] == "calendar_event_existing"
+    # Phase 32: verify payload_hash matches current task hash after stale resync
+    conn = get_db()
+    task_row = conn.execute(
+        "SELECT * FROM tasks WHERE task_id = ?", (sync["task_id"],)
+    ).fetchone()
+    expected_hash = compute_task_payload_hash(dict(task_row))
+    assert state["payload_hash"] == expected_hash
 
 
 def test_skipped_state_is_not_picked_or_pushed_by_scan():

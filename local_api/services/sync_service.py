@@ -196,19 +196,48 @@ class SyncService:
 
         # 5. Duplicate create guard: already synced records with an external_id
         # are idempotently skipped instead of creating a second Calendar event.
+        # Phase 32: detect drift via payload_hash mismatch — only skip when
+        # the stored hash matches the current task hash.  Mismatch or missing
+        # stored hash → fall through to resync.
         if (
             sync_state is not None
             and sync_state.get("sync_status") == "synced"
             and sync_state.get("external_id")
         ):
-            return {
-                "success": True,
-                "sync_id": sync_id,
-                "sync_status": "skipped",
-                "external_id": sync_state.get("external_id"),
-                "error_code": "already_synced",
-                "error_message": "Task is already synced to Apple Calendar",
-            }
+            stored_hash = sync_state.get("payload_hash")
+            current_hash = compute_task_payload_hash(task_data)
+            if stored_hash and current_hash and stored_hash == current_hash:
+                return {
+                    "success": True,
+                    "sync_id": sync_id,
+                    "sync_status": "skipped",
+                    "external_id": sync_state.get("external_id"),
+                    "error_code": "already_synced",
+                    "error_message": "Task is already synced to Apple Calendar",
+                }
+            # Phase 32: hash mismatch or missing stored hash → drift detected.
+            # Transition to stale so the stale→pending→in_progress pipeline
+            # handles this record as an update instead of a fresh create.
+            stale_transitioned, stale_err = _safe_transition(
+                sync_id, "stale", trigger="trigger"
+            )
+            if stale_transitioned is None:
+                return _error_result(
+                    sync_id=sync_id,
+                    status=sync_state.get("sync_status", "synced"),
+                    code="invalid_transition",
+                    message=f"synced→stale drift transition failed: {stale_err}",
+                    external_id=sync_state.get("external_id"),
+                )
+            # Re-read so downstream code sees the updated status
+            sync_state = get_sync_state_by_key(task_id, sync_target)
+            if sync_state is None:
+                return _error_result(
+                    sync_id=sync_id,
+                    status="failed_permanent",
+                    code="state_lookup_failed",
+                    message="sync_state disappeared after drift→stale transition",
+                )
 
         # 6. Phase 22 eligibility guardrails run before new sync_state creation
         # and before processing existing pending/failed records.
