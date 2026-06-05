@@ -506,19 +506,51 @@ class SyncService:
         else:
             permanent_errors = {"auth_failed", "adapter_config_invalid", "invalid_data"}
             target = "failed_permanent" if push_result.error_code in permanent_errors else "failed"
-            _safe_transition(sync_id, target, trigger="engine")
+            transitioned, transition_error = _safe_transition(
+                sync_id, target, trigger="engine"
+            )
+            if transitioned is not None:
+                _log_failure(
+                    sync_id, task_id, sync_target,
+                    attempt=attempt,
+                    code=push_result.error_code or "push_failed",
+                    message=push_result.error_message or "Push failed",
+                )
+                return _error_result(
+                    sync_id=sync_id,
+                    status=target,
+                    code=push_result.error_code,
+                    message=push_result.error_message,
+                    external_id=push_result.external_id,
+                )
+            # Phase 33: transition to failure state failed — do NOT
+            # pretend the target state was reached. Read the real
+            # persisted status and align both result and sync_log.
+            current = get_sync_state_by_key(task_id, sync_target)
+            if current is None:
+                return _error_result(
+                    sync_id=sync_id,
+                    status="in_progress",
+                    code="failure_finalize_failed",
+                    message=(
+                        f"{target} transition failed and sync_state lookup failed: "
+                        f"{transition_error}"
+                    ),
+                    external_id=sync_state.get("external_id"),
+                )
+            real_status = current.get("sync_status") or "failed_permanent"
             _log_failure(
                 sync_id, task_id, sync_target,
                 attempt=attempt,
-                code=push_result.error_code or "push_failed",
-                message=push_result.error_message or "Push failed",
+                code="failure_finalize_failed",
+                message=f"{target} transition failed: {transition_error}",
             )
             return _error_result(
                 sync_id=sync_id,
-                status=target,
-                code=push_result.error_code,
-                message=push_result.error_message,
-                external_id=push_result.external_id,
+                status=real_status,
+                code="failure_finalize_failed",
+                message=f"{target} transition failed: {transition_error}",
+                external_id=sync_state.get("external_id"),
             )
 
     def _next_sync_attempt(self, sync_id: str) -> int:

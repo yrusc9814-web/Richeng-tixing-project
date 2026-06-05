@@ -1852,3 +1852,295 @@ class TestPhase31SuccessFinalization:
         assert len(logs) == 1
         assert logs[0]["sync_result"] == "success"
         assert logs[0]["triggered_by"] == "sync_service"
+
+
+# ── Phase 33 — Failure finalization consistency hardening ───────────────
+
+
+class TestPhase33FailureFinalizationRetryable:
+    """Phase 33 A: retryable adapter failure + failed finalization
+    transition failure.  When _safe_transition to 'failed' fails, the
+    result must not pretend the state is 'failed'."""
+
+    def test_retryable_failure_with_failed_transition_failure_preserves_state(
+        self, monkeypatch
+    ):
+        """When adapter returns retryable failure and _safe_transition to
+        'failed' fails, direct sync must:
+        - not return success
+        - not pretend status is 'failed'
+        - return real persisted status
+        - use error_code 'failure_finalize_failed'
+        - preserve existing external_id from sync_state
+        - not refresh payload_hash
+        - write sync_log with failure_finalize_failed error code
+        """
+        _insert_task("task_p33_retry", sync_enabled=1)
+        # Create a synced record with external_id, then mark stale so the
+        # stale→pending→in_progress pipeline runs before the push.
+        state = create_sync_state(
+            "task_p33_retry", "apple_calendar", sync_status="synced"
+        )
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_p33_retry",
+            payload_hash="old_hash_p33_retry",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+        transition_sync_state(state["sync_id"], "stale", trigger="trigger")
+
+        from local_api.services import sync_service as svc_mod
+
+        real_safe_transition = svc_mod._safe_transition
+
+        def _failing_transition(sync_id, to_status, trigger="service"):
+            if to_status == "failed":
+                return None, RuntimeError(
+                    "Simulated failed transition failure"
+                )
+            return real_safe_transition(sync_id, to_status, trigger=trigger)
+
+        monkeypatch.setattr(
+            svc_mod, "_safe_transition", _failing_transition
+        )
+
+        svc = SyncService(adapters=[MockFailAdapter()])
+        result = svc.run_task_sync("task_p33_retry", "apple_calendar")
+
+        # Must NOT report success
+        assert result["success"] is False
+
+        # Must NOT pretend state is 'failed' — return real persisted status
+        assert result["sync_status"] == "in_progress", (
+            f"Expected real persisted status 'in_progress', "
+            f"got '{result['sync_status']}'"
+        )
+        assert result["error_code"] == "failure_finalize_failed"
+        assert "failed transition failed" in result["error_message"]
+
+        # external_id must be preserved from sync_state (not cleared)
+        assert result["external_id"] == "ext_p33_retry"
+
+        # DB state must NOT be 'failed'
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "in_progress"
+        # external_id must be preserved in DB
+        assert persisted["external_id"] == "ext_p33_retry"
+        # payload_hash must NOT be refreshed
+        assert persisted["payload_hash"] == "old_hash_p33_retry"
+
+        # Sync_log must use failure_finalize_failed, NOT the adapter error,
+        # and must not contradict the real persisted state. The log layer may
+        # redact error_message, so do not assert the raw transition text or
+        # compare against adapter-specific message strings.
+        logs = _logs(state["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "failure_finalize_failed"
+        assert logs[0]["error_message"]
+
+
+class TestPhase33FailureFinalizationPermanent:
+    """Phase 33 B: permanent adapter failure + failed_permanent finalization
+    transition failure.  When _safe_transition to 'failed_permanent' fails,
+    the result must not pretend the state is 'failed_permanent'."""
+
+    def test_permanent_failure_with_failed_permanent_transition_failure(
+        self, monkeypatch
+    ):
+        """When adapter returns permanent failure and _safe_transition to
+        'failed_permanent' fails, direct sync must:
+        - not return success
+        - not pretend status is 'failed_permanent'
+        - return real persisted status
+        - use error_code 'failure_finalize_failed'
+        - sync_log must align to real persisted state
+        """
+        _insert_task("task_p33_perm", sync_enabled=1)
+        state = create_sync_state(
+            "task_p33_perm", "apple_calendar", sync_status="synced"
+        )
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_p33_perm",
+            payload_hash="old_hash_p33_perm",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+        transition_sync_state(state["sync_id"], "stale", trigger="trigger")
+
+        from local_api.services import sync_service as svc_mod
+
+        real_safe_transition = svc_mod._safe_transition
+
+        def _failing_transition(sync_id, to_status, trigger="service"):
+            if to_status == "failed_permanent":
+                return None, RuntimeError(
+                    "Simulated failed_permanent transition failure"
+                )
+            return real_safe_transition(sync_id, to_status, trigger=trigger)
+
+        monkeypatch.setattr(
+            svc_mod, "_safe_transition", _failing_transition
+        )
+
+        svc = SyncService(adapters=[MockPermanentFailAdapter()])
+        result = svc.run_task_sync("task_p33_perm", "apple_calendar")
+
+        # Must NOT report success
+        assert result["success"] is False
+
+        # Must NOT pretend state is 'failed_permanent' — return real
+        # persisted status
+        assert result["sync_status"] == "in_progress", (
+            f"Expected real persisted status 'in_progress', "
+            f"got '{result['sync_status']}'"
+        )
+        assert result["error_code"] == "failure_finalize_failed"
+        assert "failed_permanent transition failed" in result["error_message"]
+
+        # DB state must NOT be 'failed_permanent'
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "in_progress"
+        # external_id must be preserved
+        assert persisted["external_id"] == "ext_p33_perm"
+        # payload_hash must NOT be refreshed
+        assert persisted["payload_hash"] == "old_hash_p33_perm"
+
+        # Sync_log must align to the real persisted state and must NOT claim
+        # the adapter-level failure code. The log layer may redact
+        # error_message, so do not assert the raw transition text or compare
+        # against adapter-specific message strings.
+        logs = _logs(state["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "failure_finalize_failed"
+        assert logs[0]["error_message"]
+
+    def test_retryable_failure_with_failed_transition_and_missing_lookup(self, monkeypatch):
+        """If finalization transition fails and post-transition lookup returns
+        None, the result must not fall back to the target failed status."""
+        _insert_task("task_p33_retry_lookup_none", sync_enabled=1)
+        state = create_sync_state(
+            "task_p33_retry_lookup_none", "apple_calendar", sync_status="synced"
+        )
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_p33_retry_lookup_none",
+            payload_hash="old_hash_p33_retry_lookup_none",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+        transition_sync_state(state["sync_id"], "stale", trigger="trigger")
+
+        from local_api.services import sync_service as svc_mod
+
+        real_safe_transition = svc_mod._safe_transition
+        real_lookup = svc_mod.get_sync_state_by_key
+        finalize_failure_seen = False
+        missing_lookup_consumed = False
+
+        def _failing_transition(sync_id, to_status, trigger="service"):
+            nonlocal finalize_failure_seen
+            if sync_id == state["sync_id"] and to_status == "failed":
+                finalize_failure_seen = True
+                return None, RuntimeError("Simulated failed transition failure")
+            return real_safe_transition(sync_id, to_status, trigger=trigger)
+
+        def _missing_lookup(task_id, sync_target):
+            nonlocal missing_lookup_consumed
+            if (
+                task_id == "task_p33_retry_lookup_none"
+                and sync_target == "apple_calendar"
+                and finalize_failure_seen
+                and not missing_lookup_consumed
+            ):
+                missing_lookup_consumed = True
+                return None
+            return real_lookup(task_id, sync_target)
+
+        monkeypatch.setattr(svc_mod, "_safe_transition", _failing_transition)
+        monkeypatch.setattr(svc_mod, "get_sync_state_by_key", _missing_lookup)
+
+        svc = SyncService(adapters=[MockFailAdapter()])
+        result = svc.run_task_sync("task_p33_retry_lookup_none", "apple_calendar")
+
+        assert result["success"] is False
+        assert result["sync_status"] == "in_progress"
+        assert result["error_code"] == "failure_finalize_failed"
+        assert "sync_state lookup failed" in result["error_message"]
+        assert result["external_id"] == "ext_p33_retry_lookup_none"
+
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "in_progress"
+        assert persisted["external_id"] == "ext_p33_retry_lookup_none"
+        assert persisted["payload_hash"] == "old_hash_p33_retry_lookup_none"
+
+        logs = _logs(state["sync_id"])
+        assert len(logs) == 0
+
+    def test_permanent_failure_with_failed_permanent_transition_and_missing_lookup(
+        self, monkeypatch
+    ):
+        """When adapter returns permanent failure, _safe_transition to
+        'failed_permanent' fails, and post-finalization lookup returns
+        None, the result must return 'in_progress' (the last known real
+        persisted state), not 'failed_permanent' or any other guessed
+        terminal state."""
+        _insert_task("task_p33_perm_lookup_none", sync_enabled=1)
+        state = create_sync_state(
+            "task_p33_perm_lookup_none", "apple_calendar", sync_status="synced"
+        )
+        update_sync_state(
+            state["sync_id"],
+            external_id="ext_p33_perm_lookup_none",
+            payload_hash="old_hash_p33_perm_lookup_none",
+            last_synced_at="2026-06-01T00:00:00",
+        )
+        transition_sync_state(state["sync_id"], "stale", trigger="trigger")
+
+        from local_api.services import sync_service as svc_mod
+
+        real_safe_transition = svc_mod._safe_transition
+        real_lookup = svc_mod.get_sync_state_by_key
+        finalize_failure_seen = False
+        missing_lookup_consumed = False
+
+        def _failing_transition(sync_id, to_status, trigger="service"):
+            nonlocal finalize_failure_seen
+            if sync_id == state["sync_id"] and to_status == "failed_permanent":
+                finalize_failure_seen = True
+                return None, RuntimeError(
+                    "Simulated failed_permanent transition failure"
+                )
+            return real_safe_transition(sync_id, to_status, trigger=trigger)
+
+        def _missing_lookup(task_id, sync_target):
+            nonlocal missing_lookup_consumed
+            if (
+                task_id == "task_p33_perm_lookup_none"
+                and sync_target == "apple_calendar"
+                and finalize_failure_seen
+                and not missing_lookup_consumed
+            ):
+                missing_lookup_consumed = True
+                return None
+            return real_lookup(task_id, sync_target)
+
+        monkeypatch.setattr(svc_mod, "_safe_transition", _failing_transition)
+        monkeypatch.setattr(svc_mod, "get_sync_state_by_key", _missing_lookup)
+
+        svc = SyncService(adapters=[MockPermanentFailAdapter()])
+        result = svc.run_task_sync(
+            "task_p33_perm_lookup_none", "apple_calendar"
+        )
+
+        assert result["success"] is False
+        assert result["sync_status"] == "in_progress"
+        assert result["sync_status"] != "failed_permanent"
+        assert result["error_code"] == "failure_finalize_failed"
+
+        # DB persisted state must remain in_progress
+        persisted = get_sync_state(state["sync_id"])
+        assert persisted["sync_status"] == "in_progress"
+        # payload_hash and external_id must remain unchanged
+        assert persisted["external_id"] == "ext_p33_perm_lookup_none"
+        assert persisted["payload_hash"] == "old_hash_p33_perm_lookup_none"
