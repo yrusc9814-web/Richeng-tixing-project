@@ -329,16 +329,18 @@ class SyncService:
             push_result: AdapterResult = adapter.push(task_data, sync_state)
         except Exception as exc:
             logger.exception("Adapter push failed for %s: %s", sync_id, exc)
-            _safe_transition(sync_id, "failed", trigger="engine")
-            _log_failure(
-                sync_id, task_id, sync_target,
-                attempt=attempt, code="adapter_exception", message=str(exc),
-            )
-            return _error_result(
+            return _finalization_failure_result(
                 sync_id=sync_id,
-                status="failed",
-                code="adapter_exception",
-                message=str(exc),
+                task_id=task_id,
+                sync_target=sync_target,
+                attempt=attempt,
+                target_status="failed",
+                original_code="adapter_exception",
+                original_message=str(exc),
+                finalization_code="failure_finalize_failed",
+                finalization_message_prefix="failed transition failed",
+                last_confirmed_status="in_progress",
+                external_id=sync_state.get("external_id"),
             )
 
         # 7. Record result
@@ -357,18 +359,19 @@ class SyncService:
                 external_id_after = external_id_before
 
             if sync_target == "apple_calendar" and not external_id_after:
-                _transition_to_failed_permanent(sync_id)
-                _log_failure(
-                    sync_id, task_id, sync_target,
-                    attempt=attempt,
-                    code="missing_external_id",
-                    message="Calendar push succeeded but returned no external_id",
-                )
-                return _error_result(
+                return _finalization_failure_result(
                     sync_id=sync_id,
-                    status="failed_permanent",
-                    code="missing_external_id",
-                    message="Calendar push succeeded but returned no external_id",
+                    task_id=task_id,
+                    sync_target=sync_target,
+                    attempt=attempt,
+                    target_status="failed_permanent",
+                    original_code="missing_external_id",
+                    original_message="Calendar push succeeded but returned no external_id",
+                    finalization_code="failure_finalize_failed",
+                    finalization_message_prefix="failed_permanent transition failed",
+                    last_confirmed_status="in_progress",
+                    external_id=sync_state.get("external_id"),
+                    transition_func=_transition_to_failed_permanent,
                 )
 
             # Phase 23: Write success metadata while state is still
@@ -388,20 +391,18 @@ class SyncService:
                 logger.exception(
                     "Metadata write failed for %s: %s", sync_id, metadata_exc
                 )
-                _safe_transition(sync_id, "failed", trigger="engine")
-                _log_failure(
-                    sync_id,
-                    task_id,
-                    sync_target,
-                    attempt=attempt,
-                    code="metadata_write_failed",
-                    message=str(metadata_exc),
-                )
-                return _error_result(
+                return _finalization_failure_result(
                     sync_id=sync_id,
-                    status="failed",
-                    code="metadata_write_failed",
-                    message=str(metadata_exc),
+                    task_id=task_id,
+                    sync_target=sync_target,
+                    attempt=attempt,
+                    target_status="failed",
+                    original_code="metadata_write_failed",
+                    original_message=str(metadata_exc),
+                    finalization_code="failure_finalize_failed",
+                    finalization_message_prefix="failed transition failed",
+                    last_confirmed_status="in_progress",
+                    external_id=external_id_after,
                 )
 
             # Phase 31: Create success log BEFORE synced transition so a
@@ -428,20 +429,18 @@ class SyncService:
                     sync_id,
                     log_exc,
                 )
-                _safe_transition(sync_id, "failed", trigger="engine")
-                _log_failure(
-                    sync_id,
-                    task_id,
-                    sync_target,
-                    attempt=attempt,
-                    code="success_finalize_failed",
-                    message=str(log_exc),
-                )
-                return _error_result(
+                return _finalization_failure_result(
                     sync_id=sync_id,
-                    status="failed",
-                    code="success_finalize_failed",
-                    message=str(log_exc),
+                    task_id=task_id,
+                    sync_target=sync_target,
+                    attempt=attempt,
+                    target_status="failed",
+                    original_code="success_finalize_failed",
+                    original_message=str(log_exc),
+                    finalization_code="success_finalize_failed",
+                    finalization_message_prefix="failed transition failed",
+                    last_confirmed_status="in_progress",
+                    external_id=external_id_after,
                 )
 
             transitioned, transition_error = _safe_transition(
@@ -598,6 +597,71 @@ def _safe_transition(
             "Could not transition %s to %s: %s", sync_id, to_status, exc,
         )
         return None, exc
+
+
+def _finalization_failure_result(
+    *,
+    sync_id: str,
+    task_id: str,
+    sync_target: str,
+    attempt: int,
+    target_status: str,
+    original_code: str,
+    original_message: str,
+    finalization_code: str,
+    finalization_message_prefix: str,
+    last_confirmed_status: str,
+    external_id: Optional[str] = None,
+    transition_func=None,
+) -> dict:
+    """Finalize a failed local path without claiming an unpersisted status."""
+    if transition_func is not None:
+        transitioned = transition_func(sync_id)
+        transition_error = None if transitioned is not None else RuntimeError(
+            f"{target_status} transition failed"
+        )
+    else:
+        transitioned, transition_error = _safe_transition(
+            sync_id, target_status, trigger="engine"
+        )
+
+    if transitioned is not None:
+        _log_failure(
+            sync_id, task_id, sync_target,
+            attempt=attempt,
+            code=original_code,
+            message=original_message,
+        )
+        return _error_result(
+            sync_id=sync_id,
+            status=target_status,
+            code=original_code,
+            message=original_message,
+            external_id=external_id,
+        )
+
+    current = get_sync_state_by_key(task_id, sync_target)
+    real_status = (
+        current.get("sync_status")
+        if current is not None
+        else last_confirmed_status
+    )
+    msg = f"{finalization_message_prefix}: {transition_error}"
+    if current is None:
+        msg = f"{finalization_message_prefix} and sync_state lookup failed: {transition_error}"
+    _log_failure(
+        sync_id, task_id, sync_target,
+        attempt=attempt,
+        code=finalization_code,
+        message=msg,
+    )
+    return _error_result(
+        sync_id=sync_id,
+        status=real_status,
+        code=finalization_code,
+        message=msg,
+        external_id=external_id,
+    )
 
 
 def _transition_to_failed_permanent(sync_id: str) -> Optional[dict]:

@@ -2144,3 +2144,160 @@ class TestPhase33FailureFinalizationPermanent:
         # payload_hash and external_id must remain unchanged
         assert persisted["external_id"] == "ext_p33_perm_lookup_none"
         assert persisted["payload_hash"] == "old_hash_p33_perm_lookup_none"
+
+
+# ── Phase 34 — Finalization rollback failure consistency ────────────────
+
+
+class TestPhase34FinalizationRollbackFailures:
+    """Finalization/rollback transition failures must not report an
+    unconfirmed terminal status or misleading business error code."""
+
+    def test_missing_external_id_failed_permanent_transition_failure(
+        self, monkeypatch
+    ):
+        _insert_task("task_p34_missing_ext", sync_enabled=1)
+
+        from local_api.services import sync_service as svc_mod
+
+        real_safe_transition = svc_mod._safe_transition
+
+        def _failing_transition(sync_id, to_status, trigger="service"):
+            if to_status == "failed_permanent":
+                return None, RuntimeError(
+                    "Simulated failed_permanent transition failure"
+                )
+            return real_safe_transition(sync_id, to_status, trigger=trigger)
+
+        monkeypatch.setattr(svc_mod, "_safe_transition", _failing_transition)
+
+        svc = SyncService(adapters=[MockSuccessNoExternalIdAdapter()])
+        result = svc.run_task_sync("task_p34_missing_ext", "apple_calendar")
+
+        assert result["success"] is False
+        persisted = get_sync_state(result["sync_id"])
+        assert persisted["sync_status"] == "in_progress"
+        assert result["sync_status"] == persisted["sync_status"]
+        assert result["error_code"] == "failure_finalize_failed"
+
+        logs = _logs(result["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "failure_finalize_failed"
+        assert logs[0]["error_code"] != "missing_external_id"
+
+    def test_metadata_failure_failed_transition_failure(self, monkeypatch):
+        _insert_task("task_p34_metadata", sync_enabled=1)
+
+        from local_api.services import sync_service as svc_mod
+
+        real_safe_transition = svc_mod._safe_transition
+
+        def _failing_transition(sync_id, to_status, trigger="service"):
+            if to_status == "failed":
+                return None, RuntimeError("Simulated failed transition failure")
+            return real_safe_transition(sync_id, to_status, trigger=trigger)
+
+        def _failing_update(sync_id, **kwargs):
+            raise RuntimeError("Simulated metadata write failure")
+
+        monkeypatch.setattr(svc_mod, "_safe_transition", _failing_transition)
+        monkeypatch.setattr(
+            "local_api.services.sync_state_service.update_sync_state",
+            _failing_update,
+        )
+
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+        result = svc.run_task_sync("task_p34_metadata", "apple_calendar")
+
+        assert result["success"] is False
+        persisted = get_sync_state(result["sync_id"])
+        assert persisted["sync_status"] == "in_progress"
+        assert result["sync_status"] == persisted["sync_status"]
+        assert result["error_code"] == "failure_finalize_failed"
+
+        logs = _logs(result["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "failure_finalize_failed"
+        assert logs[0]["error_code"] != "metadata_write_failed"
+
+    def test_success_log_failure_failed_transition_failure(self, monkeypatch):
+        _insert_task("task_p34_success_log", sync_enabled=1)
+
+        from local_api.services import sync_service as svc_mod
+
+        real_safe_transition = svc_mod._safe_transition
+        real_create = svc_mod.create_sync_log
+
+        def _failing_transition(sync_id, to_status, trigger="service"):
+            if to_status == "failed":
+                return None, RuntimeError("Simulated failed transition failure")
+            return real_safe_transition(sync_id, to_status, trigger=trigger)
+
+        def _failing_create(*args, **kwargs):
+            if kwargs.get("sync_result") == "success":
+                raise RuntimeError("Simulated success log failure")
+            return real_create(*args, **kwargs)
+
+        monkeypatch.setattr(svc_mod, "_safe_transition", _failing_transition)
+        monkeypatch.setattr(svc_mod, "create_sync_log", _failing_create)
+
+        svc = SyncService(adapters=[MockSuccessAdapter()])
+        result = svc.run_task_sync("task_p34_success_log", "apple_calendar")
+
+        assert result["success"] is False
+        persisted = get_sync_state(result["sync_id"])
+        assert persisted["sync_status"] == "in_progress"
+        assert result["sync_status"] == persisted["sync_status"]
+        assert result["error_code"] == "success_finalize_failed"
+
+        logs = _logs(result["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "success_finalize_failed"
+
+    def test_adapter_exception_failed_transition_failure(self, monkeypatch):
+        class CrashingAdapter(SyncAdapter):
+            @property
+            def target_name(self) -> str:
+                return "apple_calendar"
+
+            def validate_config(self) -> tuple[bool, Optional[str]]:
+                return (True, None)
+
+            def push(self, task_data: dict, sync_state: dict) -> AdapterResult:
+                raise RuntimeError("Simulated adapter crash")
+
+            def pull(self, external_id: str) -> Optional[dict]:
+                return None
+
+        _insert_task("task_p34_adapter_exception", sync_enabled=1)
+
+        from local_api.services import sync_service as svc_mod
+
+        real_safe_transition = svc_mod._safe_transition
+
+        def _failing_transition(sync_id, to_status, trigger="service"):
+            if to_status == "failed":
+                return None, RuntimeError("Simulated failed transition failure")
+            return real_safe_transition(sync_id, to_status, trigger=trigger)
+
+        monkeypatch.setattr(svc_mod, "_safe_transition", _failing_transition)
+
+        svc = SyncService(adapters=[CrashingAdapter()])
+        result = svc.run_task_sync(
+            "task_p34_adapter_exception", "apple_calendar"
+        )
+
+        assert result["success"] is False
+        persisted = get_sync_state(result["sync_id"])
+        assert persisted["sync_status"] == "in_progress"
+        assert result["sync_status"] == persisted["sync_status"]
+        assert result["error_code"] == "failure_finalize_failed"
+
+        logs = _logs(result["sync_id"])
+        assert len(logs) == 1
+        assert logs[0]["sync_result"] == "failed"
+        assert logs[0]["error_code"] == "failure_finalize_failed"
+        assert logs[0]["error_code"] != "adapter_exception"
