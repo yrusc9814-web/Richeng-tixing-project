@@ -419,7 +419,144 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// ── Helper writer mode ──────────────────────────────────────────────────────
+struct WriterPayload: Codable {
+    let task_id: String
+    let run_id: String
+    let title: String
+    let start_iso: String
+    let end_iso: String
+    let external_id: String?
+    let location: String?
+    let notes: String?
+}
+
+struct WriterReport: Codable {
+    let mode: String
+    let task_id: String
+    let run_id: String
+    var success: Bool
+    var external_id: String?
+    var error_code: String?
+    var error_message: String?
+}
+
+func writerArgumentValue(_ flag: String) -> String? {
+    let arguments = CommandLine.arguments
+    guard let index = arguments.firstIndex(of: flag) else { return nil }
+    let next = arguments.index(after: index)
+    guard next < arguments.endIndex else { return nil }
+    let value = arguments[next].trimmingCharacters(in: .whitespacesAndNewlines)
+    return value.isEmpty ? nil : value
+}
+
+func writeReportFile(_ report: WriterReport, path: String) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let data = try? encoder.encode(report) {
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
+func performWriteEventAndQuit() {
+    func finish(report: WriterReport, reportFile: String) {
+        writeReportFile(report, path: reportFile)
+        NSApp.terminate(nil)
+    }
+
+    guard let payloadFile = writerArgumentValue("--payload-file"),
+          let reportFile = writerArgumentValue("--report-file") else {
+        let report = WriterReport(mode: "write_event", task_id: "unknown", run_id: "unknown", success: false, external_id: nil, error_code: "invalid_arguments", error_message: "Missing --payload-file or --report-file")
+        writeReportFile(report, path: "/tmp/helper-writer-error.json")
+        NSApp.terminate(nil)
+        return
+    }
+
+    let payload: WriterPayload
+    do {
+        let data = try Data(contentsOf: URL(fileURLWithPath: payloadFile))
+        payload = try JSONDecoder().decode(WriterPayload.self, from: data)
+    } catch {
+        let report = WriterReport(mode: "write_event", task_id: "unknown", run_id: "unknown", success: false, external_id: nil, error_code: "payload_parse_failed", error_message: error.localizedDescription)
+        finish(report: report, reportFile: reportFile)
+        return
+    }
+
+    let status = EKEventStore.authorizationStatus(for: .event)
+    var granted: Bool { if #available(macOS 14.0, *) { return status == .fullAccess }; return status == .authorized }
+    guard granted else {
+        let report = WriterReport(mode: "write_event", task_id: payload.task_id, run_id: payload.run_id, success: false, external_id: nil, error_code: "auth_failed", error_message: "Calendar TCC permission is not granted for LifeSyncCalendarHelper.")
+        finish(report: report, reportFile: reportFile)
+        return
+    }
+
+    let store = EKEventStore()
+
+    func parseISO(_ iso: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = formatter.date(from: iso) { return d }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: iso)
+    }
+
+    guard let startDate = parseISO(payload.start_iso),
+          let endDate = parseISO(payload.end_iso) else {
+        let report = WriterReport(mode: "write_event", task_id: payload.task_id, run_id: payload.run_id, success: false, external_id: nil, error_code: "invalid_date", error_message: "Cannot parse start_iso or end_iso")
+        finish(report: report, reportFile: reportFile)
+        return
+    }
+
+    func findEvent(by externalID: String) -> EKEvent? {
+        let pred = store.predicateForEvents(
+            withStart: Date(timeIntervalSinceNow: -86400 * 30),
+            end: Date(timeIntervalSinceNow: 86400 * 365),
+            calendars: nil
+        )
+        let events = store.events(matching: pred)
+        for event in events {
+            if event.eventIdentifier == externalID { return event }
+        }
+        return nil
+    }
+
+    let event: EKEvent
+    if let existingID = payload.external_id, !existingID.isEmpty, let found = findEvent(by: existingID) {
+        event = found
+    } else {
+        guard let calendar = store.defaultCalendarForNewEvents else {
+            let report = WriterReport(mode: "write_event", task_id: payload.task_id, run_id: payload.run_id, success: false, external_id: nil, error_code: "calendar_unavailable", error_message: "No default Calendar available for new events.")
+            finish(report: report, reportFile: reportFile)
+            return
+        }
+        event = EKEvent(eventStore: store)
+        event.calendar = calendar
+    }
+
+    event.title = payload.title
+    event.startDate = startDate
+    event.endDate = endDate
+    if let notes = payload.notes { event.notes = notes }
+    if let location = payload.location { event.location = location }
+
+    do {
+        try store.save(event, span: .thisEvent)
+    } catch {
+        let report = WriterReport(mode: "write_event", task_id: payload.task_id, run_id: payload.run_id, success: false, external_id: nil, error_code: "calendar_save_failed", error_message: error.localizedDescription)
+        finish(report: report, reportFile: reportFile)
+        return
+    }
+
+    let report = WriterReport(mode: "write_event", task_id: payload.task_id, run_id: payload.run_id, success: true, external_id: event.eventIdentifier, error_code: nil, error_message: nil)
+    finish(report: report, reportFile: reportFile)
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
-app.run()
+
+if CommandLine.arguments.contains("--write-event") {
+    performWriteEventAndQuit()
+} else {
+    app.run()
+}

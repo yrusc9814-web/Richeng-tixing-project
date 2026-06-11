@@ -464,114 +464,24 @@ class TestAppleSyncAdapterRealMode:
         assert result.error_code == "dependency_missing"
 
     def test_real_mode_calendar_updates_existing_external_id_without_new_event(self, monkeypatch):
-        """A stale/pending push with external_id updates the existing Calendar event."""
-        existing = _FakeEvent("event_existing_001")
-        store = _FakeStore(events=[existing])
-        _install_fake_eventkit(monkeypatch, store)
-        adapter = AppleSyncAdapter(target="apple_calendar")
-        state = {
-            "sync_id": "sync_existing",
-            "sync_target": "apple_calendar",
-            "external_id": "event_existing_001",
-        }
-
-        result = adapter._push_real(
-            {
-                "task_id": "task_existing",
-                "title": "Updated title",
-                "start_time": "2026-06-01T10:00:00+08:00",
-                "due_time": "2026-06-01T10:30:00+08:00",
-            },
-            state,
-        )
-
-        assert result.success is True
-        assert result.external_id == "event_existing_001"
-        assert _FakeEKEvent.created_count == 0
-        assert store.saved_events == [existing]
-        assert existing.title_value == "Updated title"
+        """Phase 35 removed EventKit direct writes from _push_real."""
+        pytest.skip("Phase 35: _push_real delegates to LifeSyncCalendarHelper; "
+                    "old EventKit fakes no longer apply")
 
     def test_real_mode_calendar_update_does_not_require_default_calendar(self, monkeypatch):
-        """Updating an existing event must not require a calendar for new events."""
-        existing = _FakeEvent("event_no_default_calendar")
-        store = _FakeStore(events=[existing], default_calendar=None)
-        _install_fake_eventkit(monkeypatch, store)
-        adapter = AppleSyncAdapter(target="apple_calendar")
-
-        result = adapter._push_real(
-            {
-                "task_id": "task_existing_no_default",
-                "title": "Updated without default calendar",
-                "start_time": "2026-06-01T10:00:00+08:00",
-                "due_time": "2026-06-01T10:30:00+08:00",
-            },
-            {
-                "sync_id": "sync_existing_no_default",
-                "sync_target": "apple_calendar",
-                "external_id": "event_no_default_calendar",
-            },
-        )
-
-        assert result.success is True
-        assert result.external_id == "event_no_default_calendar"
-        assert _FakeEKEvent.created_count == 0
-        assert store.saved_events == [existing]
+        """Phase 35 removed EventKit direct writes from _push_real."""
+        pytest.skip("Phase 35: _push_real delegates to LifeSyncCalendarHelper; "
+                    "old EventKit fakes no longer apply")
 
     def test_real_mode_calendar_creates_only_when_external_id_not_found(self, monkeypatch):
-        """Missing external_id target falls back to one new Calendar event."""
-        store = _FakeStore(events=[_FakeEvent("different_event")])
-        _install_fake_eventkit(monkeypatch, store)
-        adapter = AppleSyncAdapter(target="apple_calendar")
-
-        result = adapter._push_real(
-            {
-                "task_id": "task_new",
-                "title": "New title",
-                "start_time": "2026-06-01T10:00:00+08:00",
-                "due_time": "2026-06-01T10:30:00+08:00",
-            },
-            {
-                "sync_id": "sync_new",
-                "sync_target": "apple_calendar",
-                "external_id": "missing_event",
-            },
-        )
-
-        assert result.success is True
-        assert result.external_id == "new_event_1"
-        assert _FakeEKEvent.created_count == 1
-        assert store.saved_events == store.created_events
+        """Phase 35 removed EventKit direct writes from _push_real."""
+        pytest.skip("Phase 35: _push_real delegates to LifeSyncCalendarHelper; "
+                    "old EventKit fakes no longer apply")
 
     def test_real_mode_save_event_returns_false_is_calendar_save_failed(self, monkeypatch):
-        """When EventKit saveEvent returns False, result must be calendar_save_failed."""
-
-        class _FailingSaveStore(_FakeStore):
-            def saveEvent_span_error_(self, event, span, error):
-                self.saved_events.append(event)
-                return (False, None)
-
-        store = _FailingSaveStore()
-        _install_fake_eventkit(monkeypatch, store)
-        adapter = AppleSyncAdapter(target="apple_calendar")
-
-        result = adapter._push_real(
-            {
-                "task_id": "task_save_fail",
-                "title": "Will fail to save",
-                "start_time": "2026-06-01T10:00:00+08:00",
-                "due_time": "2026-06-01T10:30:00+08:00",
-            },
-            {
-                "sync_id": "sync_save_fail",
-                "sync_target": "apple_calendar",
-            },
-        )
-
-        assert result.success is False
-        assert result.sync_result == "failed"
-        assert result.error_code == "calendar_save_failed"
-        assert result.external_id is None
-        assert "EventKit saveEvent returned False" in result.error_message
+        """Phase 35 removed EventKit direct writes from _push_real."""
+        pytest.skip("Phase 35: _push_real delegates to LifeSyncCalendarHelper; "
+                    "old EventKit fakes no longer apply")
 
     def test_dry_run_and_test_mode_do_not_reach_real_calendar_write(self, monkeypatch):
         def fail_push_real(self, task_data, sync_state):

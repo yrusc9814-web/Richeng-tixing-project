@@ -301,6 +301,12 @@ class AppleSyncAdapter(SyncAdapter):
     def _push_real(self, task_data: dict, sync_state: dict) -> AdapterResult:
         """Create or update one real Apple Calendar event via EventKit.
 
+        Phase 35: delegates real EventKit writes to LifeSyncCalendarHelper.app
+        (the only process with TCC Calendar permission).  The helper receives
+        a JSON payload and returns a JSON report; this adapter parses the
+        report and produces the AdapterResult.  Python never imports EventKit
+        directly for Calendar writes.
+
         Phase 18B intentionally supports Calendar only. Reminders are not
         touched from this method.
         """
@@ -312,79 +318,142 @@ class AppleSyncAdapter(SyncAdapter):
                 error_message="Phase 18B supports Calendar writes only; Reminders are disabled.",
             )
 
+        import json
+        import os
+        import subprocess
+        import tempfile
+        import uuid
+        from pathlib import Path
+
+        title = self._real_event_title(task_data)
+        start_dt, end_dt = self._real_event_window(task_data)
+        notes = self._real_event_notes(task_data, sync_state)
+        location = task_data.get("location")
+        external_id_before = str(sync_state.get("external_id") or "")
+        task_id = str(task_data.get("task_id") or "")
+
+        run_id = str(uuid.uuid4())
+
+        # Resolve helper relative to project root (same tree as this file)
+        _helper_root = Path(__file__).resolve().parents[2]
+        helper_app = str(_helper_root / "tools" / "calendar-helper" / "LifeSyncCalendarHelper.app")
+
+        payload = {
+            "task_id": task_id,
+            "run_id": run_id,
+            "title": title,
+            "start_iso": start_dt.isoformat(),
+            "end_iso": end_dt.isoformat(),
+            "external_id": external_id_before if external_id_before else None,
+            "location": str(location) if location else None,
+            "notes": notes if notes else None,
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as pf:
+            pf.write(json.dumps(payload, ensure_ascii=False))
+            payload_path = pf.name
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as rf:
+            report_path = rf.name
+
         try:
-            import EventKit  # type: ignore[import-not-found]
-            import Foundation  # type: ignore[import-not-found]
-        except ImportError as exc:
+            cmd = [
+                "/usr/bin/open",
+                "-n",
+                "-W",
+                helper_app,
+                "--args",
+                "--write-event",
+                "--payload-file",
+                payload_path,
+                "--report-file",
+                report_path,
+            ]
+            _ = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
             return AdapterResult(
                 success=False,
                 sync_result="failed",
-                error_code="dependency_missing",
-                error_message=f"EventKit/PyObjC dependency missing: {exc}",
-            )
-
-        try:
-            store = EventKit.EKEventStore.alloc().init()
-            if not bool(store.accessGrantedForEntityType_(EventKit.EKEntityTypeEvent)):
-                return AdapterResult(
-                    success=False,
-                    sync_result="failed",
-                    error_code="auth_failed",
-                    error_message="Calendar TCC permission is not granted for this Python process.",
-                )
-
-            title = self._real_event_title(task_data)
-            start_dt, end_dt = self._real_event_window(task_data)
-
-            event = self._find_real_event_by_external_id(
-                store,
-                Foundation,
-                str(sync_state.get("external_id") or ""),
-            )
-            if event is None:
-                default_calendar = store.defaultCalendarForNewEvents()
-                if default_calendar is None:
-                    return AdapterResult(
-                        success=False,
-                        sync_result="failed",
-                        error_code="calendar_unavailable",
-                        error_message="No default Apple Calendar is available for new events.",
-                    )
-                event = EventKit.EKEvent.eventWithEventStore_(store)
-                event.setCalendar_(default_calendar)
-
-            event.setTitle_(title)
-            event.setStartDate_(Foundation.NSDate.dateWithTimeIntervalSince1970_(start_dt.timestamp()))
-            event.setEndDate_(Foundation.NSDate.dateWithTimeIntervalSince1970_(end_dt.timestamp()))
-
-            notes = self._real_event_notes(task_data, sync_state)
-            if notes:
-                event.setNotes_(notes)
-
-            location = task_data.get("location")
-            if location:
-                event.setLocation_(str(location))
-
-            success, error = store.saveEvent_span_error_(event, EventKit.EKSpanThisEvent, None)
-            if not success:
-                return AdapterResult(
-                    success=False,
-                    sync_result="failed",
-                    error_code="calendar_save_failed",
-                    error_message=str(error) if error else "EventKit saveEvent returned False.",
-                )
-
-            return AdapterResult(
-                success=True,
-                external_id=str(event.eventIdentifier()),
-                sync_result="success",
+                error_code="helper_timeout",
+                error_message="LifeSyncCalendarHelper timed out after 60s.",
             )
         except Exception as exc:
             return AdapterResult(
                 success=False,
                 sync_result="failed",
-                error_code="calendar_exception",
-                error_message=str(exc),
+                error_code="helper_crashed",
+                error_message=f"LifeSyncCalendarHelper subprocess failed: {exc}",
+            )
+        finally:
+            try:
+                os.unlink(payload_path)
+            except OSError:
+                pass
+
+        # Read report
+        try:
+            with open(report_path) as f:
+                report = json.load(f)
+        except FileNotFoundError:
+            return AdapterResult(
+                success=False,
+                sync_result="failed",
+                error_code="helper_report_missing",
+                error_message="LifeSyncCalendarHelper did not produce a report file.",
+            )
+        except json.JSONDecodeError as exc:
+            return AdapterResult(
+                success=False,
+                sync_result="failed",
+                error_code="helper_report_invalid",
+                error_message=f"LifeSyncCalendarHelper report is not valid JSON: {exc}",
+            )
+        finally:
+            try:
+                os.unlink(report_path)
+            except OSError:
+                pass
+
+        # Validate report
+        if report.get("mode") != "write_event":
+            return AdapterResult(
+                success=False,
+                sync_result="failed",
+                error_code="helper_mode_mismatch",
+                error_message=f"Expected mode=write_event, got {report.get('mode')}",
+            )
+        if report.get("task_id") != task_id:
+            return AdapterResult(
+                success=False,
+                sync_result="failed",
+                error_code="helper_task_id_mismatch",
+                error_message=f"Report task_id {report.get('task_id')} != {task_id}",
+            )
+        if report.get("run_id") != run_id:
+            return AdapterResult(
+                success=False,
+                sync_result="failed",
+                error_code="helper_run_id_mismatch",
+                error_message=f"Report run_id {report.get('run_id')} != {run_id}",
+            )
+
+        if report.get("success"):
+            return AdapterResult(
+                success=True,
+                external_id=report.get("external_id") or "helper_no_external_id",
+                sync_result="success",
+            )
+        else:
+            return AdapterResult(
+                success=False,
+                sync_result="failed",
+                error_code=report.get("error_code") or "helper_unknown_error",
+                error_message=report.get("error_message") or "LifeSyncCalendarHelper returned failure without details.",
             )
 
     @staticmethod
