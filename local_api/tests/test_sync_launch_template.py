@@ -28,6 +28,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 SCRIPTS_DIR = os.path.join(REPO_ROOT, "local_api", "scripts")
 
 PLIST_PATH = os.path.join(SCRIPTS_DIR, "sync_trigger.plist.template")
+BACKGROUND_PLIST_PATH = os.path.join(SCRIPTS_DIR, "life_sync_background.plist.template")
+BACKGROUND_WRAPPER_PATH = os.path.join(REPO_ROOT, "scripts", "life-sync-background.sh")
 CRONTAB_PATH = os.path.join(SCRIPTS_DIR, "sync_trigger.crontab.template")
 SCHTASK_PATH = os.path.join(SCRIPTS_DIR, "sync_trigger_schtask.bat.template")
 
@@ -54,6 +56,12 @@ class TestTemplateFilesExist:
 
     def test_schtask_template_exists(self):
         assert os.path.isfile(SCHTASK_PATH), f"Missing: {SCHTASK_PATH}"
+
+    def test_background_plist_template_exists(self):
+        assert os.path.isfile(BACKGROUND_PLIST_PATH), f"Missing: {BACKGROUND_PLIST_PATH}"
+
+    def test_background_wrapper_exists(self):
+        assert os.path.isfile(BACKGROUND_WRAPPER_PATH), f"Missing: {BACKGROUND_WRAPPER_PATH}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -134,6 +142,67 @@ class TestPlistTemplate:
     def test_dry_run_commented(self, plist_content: str):
         """Dry-run is mentioned at least in comments."""
         assert "dry-run" in plist_content.lower() or "DryRun" in plist_content
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 2B — Phase 37 background LaunchAgent validation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestBackgroundLaunchAgentTemplate:
+    """Background LaunchAgent must call the non-interactive wrapper."""
+
+    @pytest.fixture(scope="class")
+    def plist_content(self) -> str:
+        return _read(BACKGROUND_PLIST_PATH)
+
+    @pytest.fixture(scope="class")
+    def plist_data(self, plist_content: str) -> dict:
+        cleaned = re.sub(r"<!--.*?-->", "", plist_content, flags=re.DOTALL)
+        return plistlib.loads(cleaned.encode("utf-8"))
+
+    def test_valid_xml(self, plist_content: str):
+        cleaned = re.sub(r"<!--.*?-->", "", plist_content, flags=re.DOTALL)
+        plistlib.loads(cleaned.encode("utf-8"))
+
+    def test_label_matches(self, plist_data: dict):
+        assert plist_data["Label"] == "com.vanta.lifesync.background-sync"
+
+    def test_program_arguments_use_background_wrapper(self, plist_data: dict):
+        args = plist_data["ProgramArguments"]
+        assert args == ["{{PROJECT_ROOT}}/scripts/life-sync-background.sh"]
+
+    def test_no_direct_python_sync_trigger(self, plist_content: str):
+        no_comments = re.sub(r"<!--.*?-->", "", plist_content, flags=re.DOTALL)
+        assert "local_api.scripts.sync_trigger" not in no_comments
+        assert "{{PYTHON}}" not in no_comments
+
+    def test_background_log_paths(self, plist_data: dict):
+        assert "background-launchagent.out.log" in plist_data["StandardOutPath"]
+        assert "background-launchagent.err.log" in plist_data["StandardErrorPath"]
+
+
+class TestBackgroundWrapper:
+    """Background wrapper must use fixed project Python and helper preflight."""
+
+    @pytest.fixture(scope="class")
+    def content(self) -> str:
+        return _read(BACKGROUND_WRAPPER_PATH)
+
+    def test_uses_fixed_project_venv_python(self, content: str):
+        assert 'PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"' in content
+        assert '"$PYTHON_BIN" -m local_api.preflight' in content
+        assert '"$PYTHON_BIN" -m local_api.scripts.sync_trigger sync-pending --limit 10' in content
+
+    def test_non_interactive_no_read_prompt(self, content: str):
+        assert "read -r" not in content
+        assert "按回车" not in content
+
+    def test_logs_to_background_sync_log(self, content: str):
+        assert "background-sync.log" in content
+
+    def test_uses_lock_directory(self, content: str):
+        assert "background-sync.lock" in content
+        assert "mkdir \"$LOCK_DIR\"" in content
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Phase 37 — LaunchAgent template for helper-owned Apple Calendar sync.
+
+  Installs a non-interactive background entry that calls:
+    {{PROJECT_ROOT}}/scripts/life-sync-background.sh
+
+  The wrapper uses {{PROJECT_ROOT}}/.venv/bin/python and helper-owned Calendar
+  TCC preflight. Do not replace this with direct Python EventKit writes.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vanta.lifesync.background-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{PROJECT_ROOT}}/scripts/life-sync-background.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{PROJECT_ROOT}}</string>
+
+    <key>StandardOutPath</key>
+    <string>{{PROJECT_ROOT}}/local_api/logs/background-launchagent.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{PROJECT_ROOT}}/local_api/logs/background-launchagent.err.log</string>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>ExitTimeOut</key>
+    <integer>120</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>
