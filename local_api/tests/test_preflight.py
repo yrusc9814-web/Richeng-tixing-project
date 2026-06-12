@@ -22,6 +22,22 @@ from unittest.mock import patch
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def mock_calendar_helper_auth(monkeypatch):
+    """Unit tests should not launch the GUI helper app."""
+    monkeypatch.setattr(
+        "local_api.preflight._check_calendar_helper_auth",
+        lambda helper_app: {
+            "ok": True,
+            "mode": "check_access",
+            "bundleIdentifier": "com.vanta.lifesync.calendar-helper",
+            "authorizationStatus": "authorized",
+            "calendarAccessGranted": True,
+            "calendarCount": 1,
+        },
+    )
+
 from local_api.preflight import (
     PreflightCheckItem,
     PreflightReport,
@@ -29,10 +45,15 @@ from local_api.preflight import (
     ReadinessLevel,
     run_preflight,
     _check_eventkit_deps,
+    _check_calendar_helper_app,
+    _check_calendar_helper_auth,
     _check_rollback_cleanup_rules,
     CHECK_APPLE_PLATFORM,
     CHECK_APPLE_EVENTKIT_DEPS,
     CHECK_APPLE_CALENDAR_PERM,
+    CHECK_APPLE_HELPER_APP,
+    CHECK_APPLE_HELPER_AUTH,
+    CHECK_APPLE_PYTHON_CALENDAR_PERM,
     CHECK_APPLE_REMINDER_PERM,
     CHECK_APPLE_DRY_RUN,
     CHECK_APPLE_TEST_MODE,
@@ -98,6 +119,9 @@ class TestPreflightDataTypes:
             CHECK_APPLE_PLATFORM,
             CHECK_APPLE_EVENTKIT_DEPS,
             CHECK_APPLE_CALENDAR_PERM,
+            CHECK_APPLE_HELPER_APP,
+            CHECK_APPLE_HELPER_AUTH,
+            CHECK_APPLE_PYTHON_CALENDAR_PERM,
             CHECK_APPLE_REMINDER_PERM,
             CHECK_APPLE_DRY_RUN,
             CHECK_APPLE_TEST_MODE,
@@ -134,7 +158,10 @@ class TestPreflightOnNonMacOS:
         report = run_preflight()
         skip_checks = [
             CHECK_APPLE_EVENTKIT_DEPS,
+            CHECK_APPLE_HELPER_APP,
+            CHECK_APPLE_HELPER_AUTH,
             CHECK_APPLE_CALENDAR_PERM,
+            CHECK_APPLE_PYTHON_CALENDAR_PERM,
             CHECK_APPLE_REMINDER_PERM,
         ]
         for name in skip_checks:
@@ -285,11 +312,15 @@ class TestPreflightWeChatConfig:
 class TestPreflightReadiness:
     """Overall readiness level computation."""
 
-    def test_not_ready_when_apple_fails_and_wechat_missing(self):
-        """On non-macOS with no WeChat config, readiness is NOT_READY."""
-        with patch.dict(os.environ, {}, clear=True):
-            report = run_preflight()
+    def test_not_ready_when_helper_auth_fails(self, monkeypatch):
+        """Helper Calendar auth failure blocks real Calendar readiness."""
+        monkeypatch.setattr(
+            "local_api.preflight._check_calendar_helper_auth",
+            lambda helper_app: {"ok": False, "detail": "Helper Calendar auth is denied."},
+        )
+        report = run_preflight()
         assert report.readiness == ReadinessLevel.NOT_READY
+        assert CHECK_APPLE_HELPER_AUTH in report.summary or CHECK_APPLE_CALENDAR_PERM in report.summary
 
     def test_partial_when_warn_only(self):
         """If only warnings exist, readiness is PARTIAL."""
@@ -322,6 +353,19 @@ class TestPreflightInternalCheckFunctions:
         """On non-macOS, EventKit deps check must return False without error."""
         result = _check_eventkit_deps()
         assert result is False
+
+    def test_calendar_helper_app_check_uses_bundle_executable(self, tmp_path):
+        helper_app = tmp_path / "LifeSyncCalendarHelper.app"
+        helper_bin = helper_app / "Contents" / "MacOS" / "LifeSyncCalendarHelper"
+        helper_bin.parent.mkdir(parents=True)
+        helper_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        helper_bin.chmod(0o755)
+        assert _check_calendar_helper_app(helper_app) is True
+
+    def test_calendar_helper_auth_missing_app_fails(self, tmp_path):
+        result = _check_calendar_helper_auth(tmp_path / "missing.app")
+        assert result["ok"] is False
+        assert "missing" in result["detail"] or "not executable" in result["detail"]
 
     def test_rollback_cleanup_returns_true(self):
         """Rollback/cleanup check returns True on valid codebase."""
@@ -364,10 +408,27 @@ class TestPreflightOutputStructure:
         names = [c.name for c in report.checks]
         assert len(names) == len(set(names)), "Duplicate check names found"
 
-    def test_exact_expected_check_count(self):
-        """Expect exactly 11 preflight checks."""
+    def test_expected_check_names_present(self):
+        """Preflight includes the required Calendar/helper readiness checks."""
         report = run_preflight()
-        assert len(report.checks) == 11
+        names = {c.name for c in report.checks}
+        expected = {
+            CHECK_APPLE_PLATFORM,
+            CHECK_APPLE_EVENTKIT_DEPS,
+            CHECK_APPLE_HELPER_APP,
+            CHECK_APPLE_HELPER_AUTH,
+            CHECK_APPLE_CALENDAR_PERM,
+            CHECK_APPLE_PYTHON_CALENDAR_PERM,
+            CHECK_APPLE_REMINDER_PERM,
+            CHECK_APPLE_DRY_RUN,
+            CHECK_APPLE_TEST_MODE,
+            CHECK_WECHAT_CONFIG,
+            CHECK_WECHAT_DRY_RUN,
+            CHECK_WECHAT_TEST_MODE,
+            CHECK_TEST_DATA_MARKING,
+            CHECK_ROLLBACK_CLEANUP,
+        }
+        assert expected.issubset(names)
 
     def test_all_statuses_are_valid_enum_values(self):
         report = run_preflight()

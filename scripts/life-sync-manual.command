@@ -8,7 +8,7 @@
 #   2. 如 ready → 执行 sync-pending（最多 10 条）
 #   3. 输出日志到 logs/manual-sync.log
 #
-# Calendar TCC 权限由 Terminal.app 继承，无需额外配置。
+# Calendar TCC 权限由 LifeSyncCalendarHelper.app 持有，无需授予 .venv Python。
 # 此入口不会启用 LaunchAgent 或后台同步。
 # =============================================================================
 
@@ -40,20 +40,17 @@ if [ ! -d "$PROJECT_DIR" ]; then
 fi
 log "✅ 项目目录: $PROJECT_DIR"
 
-# 2. .venv 存在
-if [ ! -f "$PROJECT_DIR/.venv/bin/activate" ]; then
-    log "❌ .venv 不存在。请先运行: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+# 2. .venv Python 存在
+PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
+if [ ! -x "$PYTHON_BIN" ]; then
+    log "❌ .venv Python 不存在或不可执行。请先运行: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
     echo "按回车键关闭此窗口..."
     read -r
     exit 1
 fi
-log "✅ .venv 可用"
+log "✅ .venv Python 可用: $PYTHON_BIN"
 
-# 3. 激活 venv
-# shellcheck disable=SC1091
-source "$PROJECT_DIR/.venv/bin/activate"
-
-# 4. preflight 检查
+# 3. preflight 检查
 log ""
 SEP=$(printf '=%.0s' {1..70})
 log "$SEP"
@@ -61,7 +58,7 @@ log "🔍 运行 preflight 安全检查..."
 log "$SEP"
 log ""
 
-PREFLIGHT_OUTPUT=$(cd "$PROJECT_DIR" && python -m local_api.preflight 2>&1 || true)
+PREFLIGHT_OUTPUT=$(cd "$PROJECT_DIR" && "$PYTHON_BIN" -m local_api.preflight 2>&1 || true)
 
 # 从 JSON 输出提取 readiness
 READINESS=$(echo "$PREFLIGHT_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin)['readiness'])" 2>/dev/null || echo "parse_error")
@@ -82,7 +79,7 @@ for c in d['checks']:
 " 2>/dev/null || echo "$PREFLIGHT_OUTPUT"
     log ""
     log "请解决上述问题后再试。"
-    log "常见原因：Calendar 权限未授权（去 系统设置 → 隐私 → 日历 添加 Python）"
+    log "常见原因：LifeSyncCalendarHelper.app 未获得 Calendar 权限（去 系统设置 → 隐私 → 日历 添加 Helper app）"
     echo ""
     echo "按回车键关闭此窗口..."
     read -r
@@ -105,7 +102,7 @@ log "$SEP"
 log ""
 
 cd "$PROJECT_DIR"
-python -m local_api.scripts.sync_trigger sync-pending --limit 10 2>&1 | tee -a "$LOG_FILE"
+"$PYTHON_BIN" -m local_api.scripts.sync_trigger sync-pending --limit 10 2>&1 | tee -a "$LOG_FILE"
 SYNC_EXIT=${PIPESTATUS[0]}
 
 log ""

@@ -8,7 +8,7 @@ Usage:
     python -c "from local_api.preflight import run_preflight; print(run_preflight().model_dump_json(indent=2))"
 
 Design principles:
-    - No real external calls (no EventKit, no WeChat API, no filesystem side effects)
+    - No real external writes (no Calendar event creation, no WeChat API)
     - Each check is self-contained and idempotent
     - Non-macOS platforms gracefully skip Apple checks
     - Output is structured JSON for programmatic consumption
@@ -19,7 +19,9 @@ from __future__ import annotations
 import os
 import sys
 import json
-from dataclasses import dataclass, field, asdict
+import subprocess
+import tempfile
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 from pathlib import Path
@@ -92,6 +94,9 @@ class PreflightReport:
 CHECK_APPLE_PLATFORM = "apple_platform"
 CHECK_APPLE_EVENTKIT_DEPS = "apple_eventkit_deps"
 CHECK_APPLE_CALENDAR_PERM = "apple_calendar_permission"
+CHECK_APPLE_HELPER_APP = "apple_calendar_helper_app"
+CHECK_APPLE_HELPER_AUTH = "apple_calendar_helper_auth"
+CHECK_APPLE_PYTHON_CALENDAR_PERM = "apple_python_calendar_permission"
 CHECK_APPLE_REMINDER_PERM = "apple_reminder_permission"
 CHECK_APPLE_DRY_RUN = "apple_dry_run_available"
 CHECK_APPLE_TEST_MODE = "apple_test_mode_available"
@@ -156,28 +161,93 @@ def run_preflight() -> PreflightReport:
             recommendation="No action needed on this platform.",
         )
 
-    # ── 3. Apple: Calendar permission ─────────────────────────────────
+    # ── 3. Apple: Calendar helper permission ──────────────────────────
     if is_macos:
-        cal_perm = _check_calendar_permission()
-        if cal_perm:
+        helper_app = _calendar_helper_app_path()
+        if _check_calendar_helper_app(helper_app):
             report.add(
-                CHECK_APPLE_CALENDAR_PERM,
+                CHECK_APPLE_HELPER_APP,
                 PreflightStatus.PASS,
-                detail="Calendar TCC permission appears granted.",
-                recommendation="Ready for Calendar write operations.",
+                detail=f"LifeSyncCalendarHelper.app exists: {helper_app}",
+                recommendation="Ready to launch the Calendar helper app.",
             )
         else:
             report.add(
+                CHECK_APPLE_HELPER_APP,
+                PreflightStatus.FAIL,
+                detail=f"LifeSyncCalendarHelper.app is missing or not launchable: {helper_app}",
+                recommendation="Build the helper app with tools/calendar-helper/build-helper.sh.",
+            )
+
+        helper_auth = _check_calendar_helper_auth(helper_app)
+        if helper_auth.get("ok"):
+            status = helper_auth.get("authorizationStatus", "unknown")
+            count = helper_auth.get("calendarCount", "unknown")
+            report.add(
+                CHECK_APPLE_HELPER_AUTH,
+                PreflightStatus.PASS,
+                detail=f"Helper Calendar auth is {status}; calendarCount={count}.",
+                recommendation="Ready for helper-owned Calendar write operations.",
+            )
+            report.add(
+                CHECK_APPLE_CALENDAR_PERM,
+                PreflightStatus.PASS,
+                detail="Calendar TCC is granted to LifeSyncCalendarHelper.app; Python Calendar TCC is not required.",
+                recommendation="Proceed with sync-pending; AppleSyncAdapter delegates writes to the helper app.",
+            )
+        else:
+            detail = helper_auth.get("detail") or "Helper Calendar authorization check failed."
+            report.add(
+                CHECK_APPLE_HELPER_AUTH,
+                PreflightStatus.FAIL,
+                detail=detail,
+                recommendation="Open LifeSyncCalendarHelper.app and grant Calendar access.",
+            )
+            report.add(
                 CHECK_APPLE_CALENDAR_PERM,
                 PreflightStatus.FAIL,
-                detail="Calendar TCC permission not detected.",
-                recommendation="Open System Settings → Privacy → Calendars and grant access.",
+                detail="Calendar TCC is not ready for the helper app.",
+                recommendation="Grant Calendar access to LifeSyncCalendarHelper.app, not the venv Python binary.",
+            )
+
+        python_cal_perm = _check_calendar_permission()
+        if python_cal_perm:
+            report.add(
+                CHECK_APPLE_PYTHON_CALENDAR_PERM,
+                PreflightStatus.PASS,
+                detail="Python Calendar TCC is also granted.",
+                recommendation="No action needed; helper app remains the production writer.",
+            )
+        else:
+            report.add(
+                CHECK_APPLE_PYTHON_CALENDAR_PERM,
+                PreflightStatus.SKIP,
+                detail="Python Calendar TCC is not granted and is no longer required for helper-based writes.",
+                recommendation="No action needed unless you restore direct Python EventKit writes.",
             )
     else:
+        report.add(
+            CHECK_APPLE_HELPER_APP,
+            PreflightStatus.SKIP,
+            detail="Not on macOS — Calendar helper app is not applicable.",
+            recommendation="No action needed on this platform.",
+        )
+        report.add(
+            CHECK_APPLE_HELPER_AUTH,
+            PreflightStatus.SKIP,
+            detail="Not on macOS — Calendar helper authorization is not applicable.",
+            recommendation="No action needed on this platform.",
+        )
         report.add(
             CHECK_APPLE_CALENDAR_PERM,
             PreflightStatus.SKIP,
             detail="Not on macOS — Calendar permission is not applicable.",
+            recommendation="No action needed on this platform.",
+        )
+        report.add(
+            CHECK_APPLE_PYTHON_CALENDAR_PERM,
+            PreflightStatus.SKIP,
+            detail="Not on macOS — Python Calendar permission is not applicable.",
             recommendation="No action needed on this platform.",
         )
 
@@ -314,6 +384,71 @@ def run_preflight() -> PreflightReport:
 
 
 # ── Internal check implementations ─────────────────────────────────────────
+
+
+def _calendar_helper_app_path() -> Path:
+    """Return the bundled LifeSyncCalendarHelper.app path for this checkout."""
+    return Path(__file__).resolve().parents[1] / "tools" / "calendar-helper" / "LifeSyncCalendarHelper.app"
+
+
+def _check_calendar_helper_app(helper_app: Path) -> bool:
+    """Check that the helper app bundle and executable exist."""
+    helper_bin = helper_app / "Contents" / "MacOS" / "LifeSyncCalendarHelper"
+    return helper_app.is_dir() and helper_bin.is_file() and os.access(helper_bin, os.X_OK)
+
+
+def _check_calendar_helper_auth(helper_app: Path) -> dict:
+    """Ask the helper app to report its Calendar TCC state without writing events."""
+    if sys.platform != "darwin":
+        return {"ok": False, "detail": "Calendar helper auth is only available on macOS."}
+    if not _check_calendar_helper_app(helper_app):
+        return {"ok": False, "detail": f"Helper app is missing or not executable: {helper_app}"}
+
+    report_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as rf:
+            report_path = rf.name
+        result = subprocess.run(
+            [
+                "/usr/bin/open",
+                "-n",
+                "-W",
+                str(helper_app),
+                "--args",
+                "--check-access",
+                "--report-file",
+                report_path,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "helper launch failed").strip()
+            return {"ok": False, "detail": detail}
+        with open(report_path, encoding="utf-8") as f:
+            report = json.load(f)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "detail": "LifeSyncCalendarHelper --check-access timed out."}
+    except Exception as exc:
+        return {"ok": False, "detail": f"LifeSyncCalendarHelper --check-access failed: {exc}"}
+    finally:
+        if report_path:
+            try:
+                os.unlink(report_path)
+            except OSError:
+                pass
+
+    if report.get("mode") != "check_access":
+        return {"ok": False, "detail": f"Unexpected helper report mode: {report.get('mode')}"}
+    if report.get("bundleIdentifier") != "com.vanta.lifesync.calendar-helper":
+        return {"ok": False, "detail": f"Unexpected helper bundle id: {report.get('bundleIdentifier')}"}
+    if not report.get("calendarAccessGranted"):
+        status = report.get("authorizationStatus", "unknown")
+        return {"ok": False, "detail": f"Helper Calendar auth is {status}."}
+    if int(report.get("calendarCount") or 0) <= 0:
+        return {"ok": False, "detail": "Helper Calendar auth is granted but no calendars are available."}
+    return {"ok": True, **report}
 
 
 def _check_eventkit_deps() -> bool:

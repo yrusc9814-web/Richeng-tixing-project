@@ -441,6 +441,16 @@ struct WriterReport: Codable {
     var error_message: String?
 }
 
+struct AccessCheckReport: Codable {
+    let mode: String
+    let bundleIdentifier: String
+    let processName: String
+    let authorizationStatus: String
+    let calendarAccessGranted: Bool
+    let calendarCount: Int
+    let error: String?
+}
+
 func writerArgumentValue(_ flag: String) -> String? {
     let arguments = CommandLine.arguments
     guard let index = arguments.firstIndex(of: flag) else { return nil }
@@ -456,6 +466,37 @@ func writeReportFile(_ report: WriterReport, path: String) {
     if let data = try? encoder.encode(report) {
         try? data.write(to: URL(fileURLWithPath: path))
     }
+}
+
+func writeAccessCheckReport(_ report: AccessCheckReport, path: String) {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    if let data = try? encoder.encode(report) {
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
+
+func performAccessCheckAndQuit() -> Never {
+    guard let reportFile = writerArgumentValue("--report-file") else {
+        Foundation.exit(2)
+    }
+
+    let bundleID = Bundle.main.bundleIdentifier ?? "unknown"
+    let processName = ProcessInfo.processInfo.processName
+    let status = EKEventStore.authorizationStatus(for: .event)
+    let granted = globalHasFullCalendarAccess(status)
+    let count = granted ? EKEventStore().calendars(for: .event).count : 0
+    let report = AccessCheckReport(
+        mode: "check_access",
+        bundleIdentifier: bundleID,
+        processName: processName,
+        authorizationStatus: globalStatusName(status),
+        calendarAccessGranted: granted,
+        calendarCount: count,
+        error: nil
+    )
+    writeAccessCheckReport(report, path: reportFile)
+    Foundation.exit(0)
 }
 
 func performWriteEventAndQuit() {
@@ -557,6 +598,8 @@ app.delegate = delegate
 
 if CommandLine.arguments.contains("--write-event") {
     performWriteEventAndQuit()
+} else if CommandLine.arguments.contains("--check-access") {
+    performAccessCheckAndQuit()
 } else {
     app.run()
 }
