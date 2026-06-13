@@ -1,4 +1,4 @@
-"""Phase 43 — Minimal CLI for creating local tasks."""
+"""Phase 44 — Productized CLI for creating local tasks."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--title", required=True, help="Task title")
     parser.add_argument("--start", required=True, help="Start time (ISO format, e.g., 2026-06-13T10:00:00)")
-    parser.add_argument("--end", required=True, help="End time (ISO format)")
+    parser.add_argument("--end", required=True, help="End time (ISO format, e.g., 2026-06-13T11:00:00)")
     parser.add_argument("--notes", default=None, help="Optional task description/notes")
     parser.add_argument("--target", default="apple_calendar", help="Sync target (default: apple_calendar)")
     return parser
@@ -34,15 +34,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if not args.title.strip():
+    title = args.title.strip()
+    if not title:
         print("Error: --title cannot be empty.", file=sys.stderr)
+        return 1
+        
+    target = args.target.strip()
+    if target != "apple_calendar":
+        print(f"Error: Unknown target '{target}'. Only 'apple_calendar' is supported.", file=sys.stderr)
         return 1
 
     try:
         start_dt = parse_iso(args.start)
         end_dt = parse_iso(args.end)
     except ValueError as e:
-        print(f"Error: Invalid date format. {e}", file=sys.stderr)
+        print(f"Error: Invalid date format. Please use ISO format (e.g., 2026-06-13T10:00:00).", file=sys.stderr)
         return 1
 
     if end_dt <= start_dt:
@@ -66,19 +72,19 @@ def main(argv: list[str] | None = None) -> int:
             """,
             (
                 task_id,
-                args.title.strip(),
+                title,
                 args.notes.strip() if args.notes else None,
                 "P2",
                 "pending",
                 args.start,
                 args.end,
-                "Asia/Shanghai",  # Defaulting for minimal CLI
+                "Asia/Shanghai",  # Defaulting for CLI
                 None,
                 0,
                 '["local_ui"]',
                 "api_test",
                 1,
-                json.dumps([args.target]),
+                json.dumps([target]),
                 now_iso,
                 now_iso,
             ),
@@ -86,22 +92,28 @@ def main(argv: list[str] | None = None) -> int:
         conn.commit()
     except Exception as e:
         conn.rollback()
-        print(f"Error creating task: {e}", file=sys.stderr)
+        print(f"Error creating task in database: {e}", file=sys.stderr)
         return 1
 
     # Create the sync state so it gets picked up by the background agent
     try:
         create_sync_state(
             task_id=task_id,
-            sync_target=args.target,
+            sync_target=target,
             sync_status="pending",
         )
     except Exception as e:
         print(f"Error queuing sync state: {e}", file=sys.stderr)
         return 1
 
-    print(f"Task created successfully! task_id={task_id}")
-    print(f"Sync state queued for {args.target}.")
+    print("\n✅ Task created successfully!")
+    print(f"  task_id      : {task_id}")
+    print(f"  title        : {title}")
+    print(f"  start        : {args.start}")
+    print(f"  end          : {args.end}")
+    print(f"  target       : {target}")
+    print(f"  sync_status  : pending")
+    print("\nNext step: Run `python -m local_api.scripts.sync_trigger sync-pending` to sync now, or wait for background agent.")
     return 0
 
 
