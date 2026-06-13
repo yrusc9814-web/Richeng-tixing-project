@@ -22,6 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end", required=True, help="End time (ISO format, e.g., 2026-06-13T11:00:00)")
     parser.add_argument("--notes", default=None, help="Optional task description/notes")
     parser.add_argument("--target", default="apple_calendar", help="Sync target (default: apple_calendar)")
+    parser.add_argument("--sync", action="store_true", help="Immediately sync the created task")
     return parser
 
 
@@ -112,9 +113,39 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  start        : {args.start}")
     print(f"  end          : {args.end}")
     print(f"  target       : {target}")
-    print(f"  sync_status  : pending")
-    print("\nNext step: Run `python -m local_api.scripts.sync_trigger sync-pending` to sync now, or wait for background agent.")
-    return 0
+    
+    if not args.sync:
+        print(f"  sync_status  : pending")
+        print("\nNext step: Run `python -m local_api.scripts.sync_trigger sync-pending` to sync now, or wait for background agent.")
+        return 0
+
+    print(f"  initial_sync_status : pending")
+    print("\nTriggering sync...")
+    try:
+        from local_api.scripts.sync_trigger import build_services
+        service, scheduler = build_services(dry_run=False, explicit_target=target)
+        result = scheduler.sync_task(task_id, target)
+        
+        # Read the external_id from db
+        conn = get_db()
+        row = conn.execute("SELECT sync_status, external_id FROM sync_state WHERE task_id=? AND sync_target=?", (task_id, target)).fetchone()
+        
+        final_status = row["sync_status"] if row else result.get("status", "unknown")
+        ext_id = row["external_id"] if row else None
+        
+        print(f"  final_sync_status   : {final_status}")
+        print(f"  external_id         : {ext_id}")
+        
+        if result.get("success"):
+            return 0
+        else:
+            err_msg = result.get("error") or "Unknown error"
+            print(f"  error               : {err_msg}", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"Error during sync: {e}", file=sys.stderr)
+        return 1
+
 
 
 if __name__ == "__main__":

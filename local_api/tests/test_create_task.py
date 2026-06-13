@@ -99,3 +99,72 @@ def test_create_task_unknown_target(capsys):
     assert rc == 1
     err = capsys.readouterr().err
     assert "Unknown target 'google_calendar'" in err
+
+
+def test_create_task_with_sync(monkeypatch, capsys):
+    # Mock the sync execution
+    def mock_build_services(dry_run, explicit_target):
+        class MockScheduler:
+            def sync_task(self, task_id, target):
+                conn = get_db()
+                conn.execute("UPDATE sync_state SET sync_status='synced', external_id='ext-123' WHERE task_id=?", (task_id,))
+                conn.commit()
+                return {"success": True, "status": "synced"}
+        return None, MockScheduler()
+
+    monkeypatch.setattr("local_api.scripts.sync_trigger.build_services", mock_build_services)
+
+    rc = create_task.main([
+        "--title", "Test Sync P45",
+        "--start", "2026-06-13T10:00:00",
+        "--end", "2026-06-13T11:00:00",
+        "--sync",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "initial_sync_status : pending" in out
+    assert "Triggering sync..." in out
+    assert "final_sync_status   : synced" in out
+    assert "external_id         : ext-123" in out
+
+def test_create_task_with_sync_failure(monkeypatch, capsys):
+    # Mock the sync execution to fail
+    def mock_build_services(dry_run, explicit_target):
+        class MockScheduler:
+            def sync_task(self, task_id, target):
+                conn = get_db()
+                conn.execute("UPDATE sync_state SET sync_status='failed' WHERE task_id=?", (task_id,))
+                conn.commit()
+                return {"success": False, "status": "failed", "error": "Mock sync error"}
+        return None, MockScheduler()
+
+    monkeypatch.setattr("local_api.scripts.sync_trigger.build_services", mock_build_services)
+
+    rc = create_task.main([
+        "--title", "Test Sync Failure P45",
+        "--start", "2026-06-13T10:00:00",
+        "--end", "2026-06-13T11:00:00",
+        "--sync",
+    ])
+    assert rc == 1
+    outerr = capsys.readouterr()
+    assert "initial_sync_status : pending" in outerr.out
+    assert "final_sync_status   : failed" in outerr.out
+    assert "error               : Mock sync error" in outerr.err
+
+def test_create_task_sync_skipped_on_validation_failure(capsys):
+    rc = create_task.main([
+        "--title", "  ",
+        "--start", "2026-06-13T10:00:00",
+        "--end", "2026-06-13T11:00:00",
+        "--sync",
+    ])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "--title cannot be empty" in err
+    
+    # Sync shouldn't be triggered or checked
+    conn = get_db()
+    task = conn.execute("SELECT * FROM tasks").fetchone()
+    assert task is None
+
