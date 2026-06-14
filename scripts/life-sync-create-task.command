@@ -24,22 +24,67 @@ if [ $# -eq 0 ]; then
     echo "==================================="
     echo
     
-    read -p "任务标题 (必填): " TITLE
-    if [ -z "$(echo "$TITLE" | tr -d '[:space:]')" ]; then
-        echo "❌ 错误: 标题不能为空"
-        read -n 1 -s -r -p "按任意键退出..."
-        echo
-        exit 1
-    fi
+    # 标题验证
+    while true; do
+        read -p "任务标题 (必填): " TITLE
+        if [ -n "$(echo "$TITLE" | tr -d '[:space:]')" ]; then
+            break
+        else
+            echo "❌ 错误: 标题不能为空，请重新输入"
+            read -n 1 -s -r -p "按任意键退出..."
+            echo
+            exit 1
+        fi
+    done
     
     NOW=$(date -u +'%Y-%m-%dT%H:00:00Z')
     LATER=$(date -u -v+1H +'%Y-%m-%dT%H:00:00Z' 2>/dev/null || date -u -d '+1 hour' +'%Y-%m-%dT%H:00:00Z')
     
-    read -p "开始时间 (默认 $NOW): " START
-    START=${START:-$NOW}
+    # 开始时间验证
+    while true; do
+        read -p "开始时间 (ISO格式, 默认 $NOW): " START
+        START=${START:-$NOW}
+        if date -j -f "%Y-%m-%dT%H:%M:%SZ" "$START" >/dev/null 2>&1 || date -d "$START" >/dev/null 2>&1; then
+            break
+        else
+            echo "❌ 错误: 时间格式错误。必须为 ISO 格式，例如: 2026-06-13T10:00:00Z"
+            read -n 1 -s -r -p "按任意键退出..."
+            echo
+            exit 1
+        fi
+    done
     
-    read -p "结束时间 (默认 $LATER): " END
-    END=${END:-$LATER}
+    # 结束时间验证
+    while true; do
+        read -p "结束时间 (ISO格式, 默认 $LATER): " END
+        END=${END:-$LATER}
+        if date -j -f "%Y-%m-%dT%H:%M:%SZ" "$END" >/dev/null 2>&1 || date -d "$END" >/dev/null 2>&1; then
+            # Convert to seconds epoch for comparison
+            if date -j -f "%Y-%m-%dT%H:%M:%SZ" "$START" "+%s" >/dev/null 2>&1; then
+                # MacOS
+                S_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$START" "+%s" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$START" "+%s" 2>/dev/null)
+                E_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$END" "+%s" 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%S" "$END" "+%s" 2>/dev/null)
+            else
+                # GNU
+                S_EPOCH=$(date -d "$START" "+%s" 2>/dev/null)
+                E_EPOCH=$(date -d "$END" "+%s" 2>/dev/null)
+            fi
+            
+            if [ -n "$S_EPOCH" ] && [ -n "$E_EPOCH" ] && [ "$E_EPOCH" -le "$S_EPOCH" ]; then
+                echo "❌ 错误: 结束时间必须晚于开始时间"
+                read -n 1 -s -r -p "按任意键退出..."
+                echo
+                exit 1
+            else
+                break
+            fi
+        else
+            echo "❌ 错误: 时间格式错误。必须为 ISO 格式，例如: 2026-06-13T10:00:00Z"
+            read -n 1 -s -r -p "按任意键退出..."
+            echo
+            exit 1
+        fi
+    done
     
     read -p "备注 (可选): " NOTES
     
