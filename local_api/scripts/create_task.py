@@ -37,23 +37,23 @@ def main(argv: list[str] | None = None) -> int:
 
     title = args.title.strip()
     if not title:
-        print("Error: --title cannot be empty.", file=sys.stderr)
+        print("❌ 错误: 任务标题(--title)不能为空。", file=sys.stderr)
         return 1
         
     target = args.target.strip()
     if target != "apple_calendar":
-        print(f"Error: Unknown target '{target}'. Only 'apple_calendar' is supported.", file=sys.stderr)
+        print(f"❌ 错误: 不支持的同步目标 '{target}'。当前仅支持 'apple_calendar'。", file=sys.stderr)
         return 1
 
     try:
         start_dt = parse_iso(args.start)
         end_dt = parse_iso(args.end)
     except ValueError as e:
-        print(f"Error: Invalid date format. Please use ISO format (e.g., 2026-06-13T10:00:00).", file=sys.stderr)
+        print(f"❌ 错误: 时间格式无效。请使用标准的 ISO 格式 (例如: 2026-06-13T10:00:00Z)。", file=sys.stderr)
         return 1
 
     if end_dt <= start_dt:
-        print("Error: --end must be strictly after --start.", file=sys.stderr)
+        print("❌ 错误: 结束时间(--end)必须晚于开始时间(--start)。", file=sys.stderr)
         return 1
 
     task_id = str(uuid.uuid4()).upper()
@@ -107,20 +107,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error queuing sync state: {e}", file=sys.stderr)
         return 1
 
-    print("\n✅ Task created successfully!")
-    print(f"  task_id      : {task_id}")
-    print(f"  title        : {title}")
-    print(f"  start        : {args.start}")
-    print(f"  end          : {args.end}")
-    print(f"  target       : {target}")
+    print("\n✅ 任务已成功创建！")
+    print(f"  任务 ID (task_id) : {task_id}")
+    print(f"  标题              : {title}")
+    print(f"  开始时间          : {args.start}")
+    print(f"  结束时间          : {args.end}")
+    print(f"  目标日历          : {target}")
     
     if not args.sync:
-        print(f"  sync_status  : pending")
-        print("\nNext step: Run `python -m local_api.scripts.sync_trigger sync-pending` to sync now, or wait for background agent.")
+        print(f"  同步状态          : 等待同步 (pending)")
+        print("\n提示：系统会在后台自动同步，或者您可以稍后执行同步命令。")
         return 0
 
-    print(f"  initial_sync_status : pending")
-    print("\nTriggering sync...")
+    print(f"  初始同步状态      : 等待同步 (pending)")
+    print("\n正在立即同步到 Apple Calendar...")
     try:
         from local_api.scripts.sync_trigger import build_services
         service, scheduler = build_services(dry_run=False, explicit_target=target)
@@ -133,17 +133,21 @@ def main(argv: list[str] | None = None) -> int:
         final_status = row["sync_status"] if row else result.get("status", "unknown")
         ext_id = row["external_id"] if row else None
         
-        print(f"  final_sync_status   : {final_status}")
-        print(f"  external_id         : {ext_id}")
+        print(f"  最终同步状态      : {final_status}")
+        if ext_id:
+            print(f"  日历外部 ID       : {ext_id}")
+        else:
+            print(f"  日历外部 ID       : (未获取)")
         
         if result.get("success"):
+            print("✅ 同步成功！")
             return 0
         else:
-            err_msg = result.get("error") or "Unknown error"
-            print(f"  error               : {err_msg}", file=sys.stderr)
+            err_msg = result.get("error") or "未知错误"
+            print(f"❌ 同步失败: {err_msg}", file=sys.stderr)
             return 1
     except Exception as e:
-        print(f"Error during sync: {e}", file=sys.stderr)
+        print(f"❌ 同步过程中发生异常: {e}", file=sys.stderr)
         return 1
 
 

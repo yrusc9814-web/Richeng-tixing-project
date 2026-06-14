@@ -22,14 +22,14 @@ def test_create_task_success(capsys):
     ])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "Task created successfully!" in out
-    assert "task_id      :" in out
-    assert "title        : Test Task P44" in out
-    assert "start        : 2026-06-13T10:00:00" in out
-    assert "end          : 2026-06-13T11:00:00" in out
-    assert "target       : apple_calendar" in out
-    assert "sync_status  : pending" in out
-    assert "sync-pending" in out  # check next steps tip
+    assert "任务已成功创建！" in out
+    assert "任务 ID (task_id) :" in out
+    assert "标题              : Test Task P44" in out
+    assert "开始时间          : 2026-06-13T10:00:00" in out
+    assert "结束时间          : 2026-06-13T11:00:00" in out
+    assert "目标日历          : apple_calendar" in out
+    assert "等待同步 (pending)" in out
+    assert "系统会在后台自动同步" in out
     
     # Verify in DB
     conn = get_db()
@@ -64,7 +64,7 @@ def test_create_task_empty_title(capsys):
     ])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "--title cannot be empty" in err
+    assert "任务标题(--title)不能为空" in err
 
 
 def test_create_task_invalid_date(capsys):
@@ -75,7 +75,7 @@ def test_create_task_invalid_date(capsys):
     ])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "Invalid date format" in err
+    assert "时间格式无效" in err
 
 
 def test_create_task_end_before_start(capsys):
@@ -86,7 +86,7 @@ def test_create_task_end_before_start(capsys):
     ])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "--end must be strictly after --start" in err
+    assert "结束时间(--end)必须晚于" in err
 
 
 def test_create_task_unknown_target(capsys):
@@ -98,7 +98,7 @@ def test_create_task_unknown_target(capsys):
     ])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "Unknown target 'google_calendar'" in err
+    assert "不支持的同步目标" in err
 
 
 def test_create_task_with_sync(monkeypatch, capsys):
@@ -122,10 +122,10 @@ def test_create_task_with_sync(monkeypatch, capsys):
     ])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "initial_sync_status : pending" in out
-    assert "Triggering sync..." in out
-    assert "final_sync_status   : synced" in out
-    assert "external_id         : ext-123" in out
+    assert "初始同步状态      : 等待同步 (pending)" in out
+    assert "正在立即同步到 Apple Calendar..." in out
+    assert "最终同步状态      : synced" in out
+    assert "日历外部 ID       : ext-123" in out
 
 def test_create_task_with_sync_failure(monkeypatch, capsys):
     # Mock the sync execution to fail
@@ -148,9 +148,9 @@ def test_create_task_with_sync_failure(monkeypatch, capsys):
     ])
     assert rc == 1
     outerr = capsys.readouterr()
-    assert "initial_sync_status : pending" in outerr.out
-    assert "final_sync_status   : failed" in outerr.out
-    assert "error               : Mock sync error" in outerr.err
+    assert "初始同步状态      : 等待同步 (pending)" in outerr.out
+    assert "最终同步状态      : failed" in outerr.out
+    assert "同步失败: Mock sync error" in outerr.err
 
 def test_create_task_sync_skipped_on_validation_failure(capsys):
     rc = create_task.main([
@@ -161,7 +161,7 @@ def test_create_task_sync_skipped_on_validation_failure(capsys):
     ])
     assert rc == 1
     err = capsys.readouterr().err
-    assert "--title cannot be empty" in err
+    assert "任务标题(--title)不能为空" in err
     
     # Sync shouldn't be triggered or checked
     conn = get_db()
