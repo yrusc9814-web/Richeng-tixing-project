@@ -11,7 +11,22 @@ python3 -m local_api.scripts.sync_doctor
 
 This returns a JSON report indicating Git status, both LaunchAgents (main and alert), preflight readiness, authorization state, and the latest logs.
 
-## 2. Viewing Logs
+## 2. 日常日程任务创建
+
+日常可以通过双击脚本来创建日程任务：
+1. 在 Finder 中打开 `scripts/` 目录。
+2. 双击运行 `创建日程任务.command`。
+3. 终端会弹出提示，根据提示输入：
+   - **任务标题**：必填，不能为空（例如 `整理明天日程`）。
+   - **开始时间 / 结束时间**：默认提供当前时间及一小时后的 ISO 格式。直接回车即使用默认时间，或自行输入 ISO 格式，例如：`2026-06-13T10:00:00Z`。
+   - **备注**：选填。
+   - **是否立即同步**：输入 `Y` (默认) 或 `N`。
+
+**常见问题处理：**
+- **创建后 Calendar 没出现**：如果选了 `Y`，检查终端最后输出的 `final_sync_status` 和 `external_id` 是否成功。如果选了 `N`，系统会在 5 分钟内通过后台自动同步。
+- **时间格式报错**：请务必确保时间字符串包含 `T` 和末尾的 `Z`，例如 `2026-06-13T10:00:00Z`。
+
+## 3. Viewing Logs
 
 All logs are stored in `local_api/logs/`.
 
