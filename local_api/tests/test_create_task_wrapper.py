@@ -19,3 +19,12 @@ def test_wrapper_script_uses_correct_python_and_passes_args():
     assert ".venv/bin/python" in content
     assert "local_api.scripts.create_task" in content
     assert "\"$@\"" in content
+
+def test_wrapper_script_has_interactive_fallback():
+    content = WRAPPER_SCRIPT.read_text(encoding="utf-8")
+    assert "if [ $# -eq 0 ]; then" in content
+    assert "read -p" in content
+    assert 'ARGS=("--title" "$TITLE"' in content
+    assert 'exec "$PYTHON" -m local_api.scripts.create_task "$@"' in content
+
+
