@@ -14,6 +14,8 @@ This returns a JSON report indicating Git status, both LaunchAgents (main and al
 ## 2. 日常日程任务创建
 
 日常可以通过双击脚本来创建日程任务：
+- **推荐方式 (桌面快捷)**：执行 `scripts/install-desktop-shortcut.sh` 安装桌面快捷入口，此后在桌面直接双击 `创建日程任务.command` 即可。
+- **备用方式 (目录执行)**：
 1. 在 Finder 中打开 `scripts/` 目录。
 2. 双击运行 `创建日程任务.command`。
 3. 终端会弹出提示，根据提示输入：
