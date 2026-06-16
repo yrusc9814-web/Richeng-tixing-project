@@ -57,8 +57,15 @@ def _row_to_response(row) -> TaskResponse:
             d["sync_targets"] = json.loads(d["sync_targets"])
         except (json.JSONDecodeError, TypeError):
             d["sync_targets"] = ["apple_calendar"]
+    for json_field in ("apple_snapshot", "conflict_metadata"):
+        if isinstance(d.get(json_field), str) and d.get(json_field):
+            try:
+                d[json_field] = json.loads(d[json_field])
+            except (json.JSONDecodeError, TypeError):
+                d[json_field] = None
     d["need_weather_check"] = bool(d.get("need_weather_check", False))
     d["sync_enabled"] = bool(d.get("sync_enabled", False))
+    d["weather_sensitive"] = bool(d.get("weather_sensitive", False))
     # last_sync_status may be enriched later by _enrich_tasks_with_sync_info
     return TaskResponse(**d)
 
@@ -323,10 +330,11 @@ def create_task(request: Request, body: TaskCreateRequest):
             INSERT INTO tasks (
                 task_id, title, description, priority, status,
                 start_time, due_time, timezone, location,
-                need_weather_check, reminder_channels, created_channel,
+                need_weather_check, schedule_type, notify_policy, weather_sensitive,
+                reminder_profile, reminder_channels, created_channel,
                 sync_enabled, sync_targets,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -339,6 +347,10 @@ def create_task(request: Request, body: TaskCreateRequest):
                 body.timezone,
                 body.location.strip() if body.location else None,
                 1 if body.need_weather_check else 0,
+                body.schedule_type,
+                body.notify_policy,
+                1 if body.weather_sensitive else 0,
+                body.reminder_profile.strip() if body.reminder_profile else None,
                 reminder_json,
                 body.created_channel,
                 1 if body.sync_enabled else 0,
@@ -450,6 +462,10 @@ def update_task(request: Request, task_id: str, body: TaskUpdateRequest):
         "timezone": lambda v: v,
         "location": lambda v: v.strip() if v else v,
         "need_weather_check": lambda v: 1 if v else 0,
+        "schedule_type": lambda v: v,
+        "notify_policy": lambda v: v,
+        "weather_sensitive": lambda v: 1 if v else 0,
+        "reminder_profile": lambda v: v.strip() if v else v,
         "reminder_channels": lambda v: json.dumps(v, ensure_ascii=False),
         "created_channel": lambda v: v,
         "sync_enabled": lambda v: 1 if v else 0,

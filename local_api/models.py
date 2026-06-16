@@ -9,6 +9,8 @@ from .config import (
     ALLOWED_STATUSES,
     ALLOWED_CHANNELS,
     ALLOWED_TIMEZONES,
+    ALLOWED_SCHEDULE_TYPES,
+    ALLOWED_NOTIFY_POLICIES,
 )
 
 # ── Request Models ────────────────────────────────────────────────────────
@@ -25,10 +27,30 @@ class TaskCreateRequest(BaseModel):
     timezone: str = Field(default="Asia/Shanghai")
     location: Optional[str] = Field(default=None, max_length=500)
     need_weather_check: bool = Field(default=False)
+    schedule_type: str = Field(default="plan")
+    notify_policy: str = Field(default="calendar_only")
+    weather_sensitive: bool = Field(default=False)
+    reminder_profile: Optional[str] = Field(default=None, max_length=500)
     reminder_channels: list[str] = Field(default=["local_ui"])
     created_channel: str = Field(default="api_test")
     sync_enabled: bool = Field(default=False)
     sync_targets: list[str] = Field(default=["apple_calendar"])
+
+    @field_validator("schedule_type")
+    @classmethod
+    def check_schedule_type(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ALLOWED_SCHEDULE_TYPES:
+            raise ValueError(f"schedule_type must be one of {sorted(ALLOWED_SCHEDULE_TYPES)}")
+        return v
+
+    @field_validator("notify_policy")
+    @classmethod
+    def check_notify_policy(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ALLOWED_NOTIFY_POLICIES:
+            raise ValueError(f"notify_policy must be one of {sorted(ALLOWED_NOTIFY_POLICIES)}")
+        return v
 
     @field_validator("priority")
     @classmethod
@@ -89,10 +111,34 @@ class TaskUpdateRequest(BaseModel):
     timezone: Optional[str] = Field(default=None)
     location: Optional[str] = Field(default=None, max_length=500)
     need_weather_check: Optional[bool] = Field(default=None)
+    schedule_type: Optional[str] = Field(default=None)
+    notify_policy: Optional[str] = Field(default=None)
+    weather_sensitive: Optional[bool] = Field(default=None)
+    reminder_profile: Optional[str] = Field(default=None, max_length=500)
     reminder_channels: Optional[list[str]] = Field(default=None)
     created_channel: Optional[str] = Field(default=None)
     sync_enabled: Optional[bool] = Field(default=None)
     sync_targets: Optional[list[str]] = Field(default=None)
+
+    @field_validator("schedule_type")
+    @classmethod
+    def check_schedule_type(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if v not in ALLOWED_SCHEDULE_TYPES:
+            raise ValueError(f"schedule_type must be one of {sorted(ALLOWED_SCHEDULE_TYPES)}")
+        return v
+
+    @field_validator("notify_policy")
+    @classmethod
+    def check_notify_policy(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip().lower()
+        if v not in ALLOWED_NOTIFY_POLICIES:
+            raise ValueError(f"notify_policy must be one of {sorted(ALLOWED_NOTIFY_POLICIES)}")
+        return v
 
     @field_validator("priority")
     @classmethod
@@ -166,11 +212,20 @@ class TaskResponse(BaseModel):
     timezone: str
     location: Optional[str] = None
     need_weather_check: bool = False
+    schedule_type: str = "plan"
+    notify_policy: str = "calendar_only"
+    weather_sensitive: bool = False
+    reminder_profile: Optional[str] = None
     reminder_channels: list = ["local_ui"]
     created_channel: str
     sync_enabled: bool = False
     sync_targets: list = ["apple_calendar"]
     last_sync_status: Optional[str] = None
+    source: Optional[str] = None
+    apple_snapshot: Optional[dict] = None
+    apple_external_id: Optional[str] = None
+    conflict_state: Optional[str] = None
+    conflict_metadata: Optional[dict] = None
     created_at: str
     updated_at: str
 

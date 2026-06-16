@@ -63,6 +63,12 @@ DEFAULT_LIMIT = 50
 # Allowed sync targets
 ALLOWED_SYNC_TARGETS = frozenset({"apple_calendar", "apple_reminder"})
 
+# Phase58 — schedule classification / notification policy
+ALLOWED_SCHEDULE_TYPES = frozenset({"plan", "action", "risk", "critical"})
+ALLOWED_NOTIFY_POLICIES = frozenset({
+    "silent", "calendar_only", "wechat_normal", "wechat_important", "wechat_emergency",
+})
+
 # Allowed sync_status values (10 states)
 ALLOWED_SYNC_STATUSES = frozenset({
     "pending", "in_progress", "synced", "failed", "failed_permanent",

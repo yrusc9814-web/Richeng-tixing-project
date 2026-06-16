@@ -123,7 +123,10 @@
                     <th style="width:18%">标题</th>
                     <th style="width:13%">开始时间</th>
                     <th style="width:13%">结束时间</th>
-                    <th style="width:12%">地点</th>
+                    <th style="width:13%">地点</th>
+                    <th style="width:9%">类型</th>
+                    <th style="width:10%">提醒策略</th>
+                    <th style="width:8%">天气敏感</th>
                     <th style="width:9%">任务状态</th>
                     <th style="width:10%">同步状态</th>
                     <th style="width:10%">同步目标</th>
@@ -181,6 +184,26 @@
               </div>
               <div class="info-card-body">
                 <div class="sync-status-summary" id="sync-summary"></div>
+              </div>
+            </div>
+
+            <!-- Reminder Status -->
+            <div class="info-card">
+              <div class="info-card-header">
+                <span>🔔 提醒状态</span>
+              </div>
+              <div class="info-card-body">
+                <div class="sync-status-summary" id="reminder-summary"></div>
+              </div>
+            </div>
+
+            <!-- Weather Overview -->
+            <div class="info-card">
+              <div class="info-card-header">
+                <span>🌦 天气概览</span>
+              </div>
+              <div class="info-card-body">
+                <div class="sync-status-summary" id="weather-summary"></div>
               </div>
             </div>
           </aside>
@@ -308,6 +331,37 @@
           <div class="form-group">
             <label class="form-label">地点</label>
             <input type="text" class="form-input" id="edit-location" placeholder="输入地点（可选）" maxlength="500">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">日程类型</label>
+              <select class="form-select" id="edit-schedule-type">
+                <option value="plan">普通计划</option>
+                <option value="action">行动任务</option>
+                <option value="risk">风险事项</option>
+                <option value="critical">关键事项</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">提醒策略</label>
+              <select class="form-select" id="edit-notify-policy">
+                <option value="silent">不主动提醒</option>
+                <option value="calendar_only">仅 Apple Calendar</option>
+                <option value="wechat_normal">普通微信提醒</option>
+                <option value="wechat_important">重要微信提醒</option>
+                <option value="wechat_emergency">强提醒</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-checkbox">
+              <input type="checkbox" id="edit-weather-sensitive">
+              天气敏感
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-label">提醒档案</label>
+            <input type="text" class="form-input" id="edit-reminder-profile" placeholder="可选，例如 面试 / 户外运动" maxlength="500">
           </div>
           <div class="form-group">
             <label class="form-checkbox">

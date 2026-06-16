@@ -24,6 +24,7 @@ from .routers import (
     sync_router,
     sync_logs_router,
     sync_routes_router,
+    reminders_router,
 )
 from .services.sync_service import SyncService
 from .scheduler.sync_scheduler import SyncScheduler
@@ -102,6 +103,7 @@ app.include_router(system_router)
 app.include_router(sync_router)
 app.include_router(sync_logs_router)
 app.include_router(sync_routes_router)
+app.include_router(reminders_router)
 
 
 # ── Frontend static files (Phase57) ────────────────────────────────────────

@@ -33,6 +33,21 @@ const TASK_STATUS_LABELS = {
   cancelled: '已取消',
 };
 
+const SCHEDULE_TYPE_LABELS = {
+  plan: '普通计划',
+  action: '行动任务',
+  risk: '风险事项',
+  critical: '关键事项',
+};
+
+const NOTIFY_POLICY_LABELS = {
+  silent: '不主动提醒',
+  calendar_only: '仅日历',
+  wechat_normal: '普通微信',
+  wechat_important: '重要微信',
+  wechat_emergency: '强提醒',
+};
+
 let currentTasks = [];
 let currentTab = 'all';
 let currentPage = 0;
@@ -102,7 +117,13 @@ function getSyncTargetLabel(target) {
   return map[target] || target || '-';
 }
 
-// ── API Calls ────────────────────────────────────────────────────────────
+function getScheduleTypeLabel(value) {
+  return SCHEDULE_TYPE_LABELS[value] || value || '-';
+}
+
+function getNotifyPolicyLabel(value) {
+  return NOTIFY_POLICY_LABELS[value] || value || '-';
+}
 
 async function apiFetch(path, options) {
   options = options || {};
@@ -160,6 +181,14 @@ async function fetchSystemStatus() {
 
 async function fetchSyncEngineStats() {
   return apiFetch('/api/system/sync-engine/stats');
+}
+
+async function fetchReminderSummary() {
+  return apiFetch('/api/local/reminders/summary');
+}
+
+async function fetchWeatherOverview() {
+  return apiFetch('/api/local/weather/overview');
 }
 
 // ── Task Filtering/Grouping ──────────────────────────────────────────────
@@ -262,6 +291,9 @@ function renderTable() {
         <td class="time-cell">${formatDatetime(task.start_time)}</td>
         <td class="time-cell">${formatDatetime(task.due_time)}</td>
         <td class="location-cell" title="${escapeHtml(task.location || '')}">${escapeHtml(task.location || '-')}</td>
+        <td>${escapeHtml(SCHEDULE_TYPE_LABELS[task.schedule_type] || task.schedule_type || '-')}</td>
+        <td>${escapeHtml(NOTIFY_POLICY_LABELS[task.notify_policy] || task.notify_policy || '-')}</td>
+        <td>${task.weather_sensitive ? '是' : '否'}</td>
         <td>${getStatusChipHtml(task.status, 'task')}</td>
         <td>${getStatusChipHtml(syncStatus, 'sync')}</td>
         <td style="font-size:12px">${escapeHtml(syncTargetDisplay)}</td>
@@ -294,6 +326,8 @@ function renderInfoPanel() {
   renderTodayList();
   renderUpcomingList();
   renderSyncSummary();
+  renderReminderSummary();
+  renderWeatherSummary();
   renderCalendarMini();
 }
 
@@ -344,6 +378,40 @@ function renderSyncSummary() {
     <div class="sync-summary-item"><span>未同步</span><span class="sync-count" style="color:var(--color-chip-skipped)">${notSynced}</span></div>
   `;
 }
+
+function renderReminderSummary() {
+  fetchReminderSummary()
+    .then(data => {
+      $('#reminder-summary').innerHTML = `
+        <div class="sync-summary-item"><span>今日待提醒</span><span class="sync-count">${data.today_pending ?? 0}</span></div>
+        <div class="sync-summary-item"><span>已发送提醒</span><span class="sync-count">${data.sent ?? 0}</span></div>
+        <div class="sync-summary-item"><span>提醒失败</span><span class="sync-count">${data.failed ?? 0}</span></div>
+        <div class="sync-summary-item"><span>微信提醒数</span><span class="sync-count">${data.wechat ?? 0}</span></div>
+        <div class="sync-summary-item"><span>Apple 提醒数</span><span class="sync-count">${data.apple ?? 0}</span></div>
+      `;
+    })
+    .catch(() => {
+      $('#reminder-summary').innerHTML = '<div style="padding:6px 0;color:var(--color-text-light);font-size:12px">暂无提醒数据</div>';
+    });
+}
+
+function renderWeatherSummary() {
+  fetchWeatherOverview()
+    .then(data => {
+      const latest = data.latest || {};
+      $('#weather-summary').innerHTML = `
+        <div class="sync-summary-item"><span>活跃预报</span><span class="sync-count">${data.active_forecasts ?? 0}</span></div>
+        <div class="sync-summary-item"><span>最新地点</span><span class="sync-count">${escapeHtml(latest.location || '-')}</span></div>
+        <div class="sync-summary-item"><span>最新天气</span><span class="sync-count">${escapeHtml(latest.condition || '-')}</span></div>
+        <div class="sync-summary-item"><span>降雨概率</span><span class="sync-count">${latest.rain_probability ?? '-'}</span></div>
+        <div class="sync-summary-item"><span>AQI</span><span class="sync-count">${latest.aqi ?? '-'}</span></div>
+      `;
+    })
+    .catch(() => {
+      $('#weather-summary').innerHTML = '<div style="padding:6px 0;color:var(--color-text-light);font-size:12px">暂无天气数据</div>';
+    });
+}
+
 
 function renderCalendarMini() {
   const now = new Date();
@@ -441,6 +509,10 @@ function editTask(taskId) {
     $('#edit-due-time').value = task.due_time ? task.due_time.replace('T', ' ').substring(0, 16) : '';
     $('#edit-timezone').value = task.timezone;
     $('#edit-location').value = task.location || '';
+    $('#edit-schedule-type').value = task.schedule_type || 'plan';
+    $('#edit-notify-policy').value = task.notify_policy || 'calendar_only';
+    $('#edit-weather-sensitive').checked = !!task.weather_sensitive;
+    $('#edit-reminder-profile').value = task.reminder_profile || '';
     $('#edit-sync-enabled').checked = task.sync_enabled;
     $('#edit-sync-targets').value = (task.sync_targets || []).join(',');
     $('#modal-title').textContent = '编辑任务';
@@ -457,6 +529,10 @@ async function saveEdit() {
     description: $('#edit-description').value.trim() || null,
     priority: $('#edit-priority').value,
     timezone: $('#edit-timezone').value,
+    schedule_type: $('#edit-schedule-type').value,
+    notify_policy: $('#edit-notify-policy').value,
+    weather_sensitive: $('#edit-weather-sensitive').checked,
+    reminder_profile: $('#edit-reminder-profile').value.trim() || null,
   };
 
   const startTime = $('#edit-start-time').value.trim();
@@ -542,6 +618,10 @@ function showCreateModal() {
   $('#edit-due-time').value = '';
   $('#edit-timezone').value = 'Asia/Shanghai';
   $('#edit-location').value = '';
+  $('#edit-schedule-type').value = 'plan';
+  $('#edit-notify-policy').value = 'calendar_only';
+  $('#edit-weather-sensitive').checked = false;
+  $('#edit-reminder-profile').value = '';
   $('#edit-sync-enabled').checked = false;
   $('#edit-sync-targets').value = 'apple_calendar';
   $('#modal-title').textContent = '创建日程';
@@ -556,6 +636,10 @@ async function saveCreate() {
     priority: $('#edit-priority').value,
     timezone: $('#edit-timezone').value,
     created_channel: 'local_ui',
+    schedule_type: $('#edit-schedule-type').value,
+    notify_policy: $('#edit-notify-policy').value,
+    weather_sensitive: $('#edit-weather-sensitive').checked,
+    reminder_profile: $('#edit-reminder-profile').value.trim() || null,
   };
 
   const startTime = $('#edit-start-time').value.trim();

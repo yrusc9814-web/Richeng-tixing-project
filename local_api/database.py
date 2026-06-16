@@ -23,6 +23,17 @@ CREATE TABLE IF NOT EXISTS tasks (
     timezone             TEXT    NOT NULL DEFAULT 'Asia/Shanghai',
     location             TEXT,
     need_weather_check   INTEGER NOT NULL DEFAULT 0,
+    schedule_type        TEXT    NOT NULL DEFAULT 'plan'
+                         CHECK (schedule_type IN ('plan', 'action', 'risk', 'critical')),
+    notify_policy        TEXT    NOT NULL DEFAULT 'calendar_only'
+                         CHECK (notify_policy IN ('silent', 'calendar_only', 'wechat_normal', 'wechat_important', 'wechat_emergency')),
+    weather_sensitive    INTEGER NOT NULL DEFAULT 0,
+    reminder_profile     TEXT,
+    source               TEXT,
+    apple_snapshot       TEXT,
+    apple_external_id    TEXT,
+    conflict_state       TEXT,
+    conflict_metadata    TEXT,
     reminder_channels    TEXT    NOT NULL DEFAULT '["local_ui"]',
     created_channel      TEXT    NOT NULL DEFAULT 'api_test'
                          CHECK (created_channel IN ('local_ui', 'wechat', 'hermes', 'api_test')),
@@ -83,6 +94,42 @@ CREATE TABLE IF NOT EXISTS sync_logs (
 CREATE INDEX IF NOT EXISTS idx_sync_logs_sync_id ON sync_logs(sync_id);
 CREATE INDEX IF NOT EXISTS idx_sync_logs_target ON sync_logs(sync_target);
 CREATE INDEX IF NOT EXISTS idx_sync_logs_result ON sync_logs(sync_result);
+
+CREATE TABLE IF NOT EXISTS notification_log (
+    id                  TEXT PRIMARY KEY,
+    task_id             TEXT NOT NULL,
+    channel             TEXT NOT NULL CHECK (channel IN ('apple_calendar', 'wechat', 'local_ui')),
+    trigger_type        TEXT NOT NULL,
+    scheduled_for       TEXT,
+    sent_at             TEXT,
+    status              TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed', 'skipped')),
+    payload_hash        TEXT NOT NULL,
+    error_message       TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    UNIQUE (task_id, channel, trigger_type, payload_hash),
+    FOREIGN KEY (task_id) REFERENCES tasks(task_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_log_task_id ON notification_log(task_id);
+CREATE INDEX IF NOT EXISTS idx_notification_log_status ON notification_log(status);
+CREATE INDEX IF NOT EXISTS idx_notification_log_channel ON notification_log(channel);
+
+CREATE TABLE IF NOT EXISTS weather_cache (
+    id                  TEXT PRIMARY KEY,
+    location            TEXT NOT NULL,
+    forecast_time       TEXT NOT NULL,
+    temperature         REAL,
+    condition           TEXT,
+    rain_probability    REAL,
+    wind_level          TEXT,
+    aqi                 INTEGER,
+    raw_payload         TEXT,
+    fetched_at          TEXT NOT NULL,
+    expires_at          TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_weather_cache_location_time ON weather_cache(location, forecast_time);
 """
 
 
@@ -90,6 +137,15 @@ _SYNC_STATE_MIGRATIONS = [
     "ALTER TABLE sync_state ADD COLUMN started_at TEXT",
     "ALTER TABLE sync_state ADD COLUMN locked_at TEXT",
     "ALTER TABLE tasks ADD COLUMN sync_targets TEXT NOT NULL DEFAULT '[\"apple_calendar\"]'",
+    "ALTER TABLE tasks ADD COLUMN schedule_type TEXT NOT NULL DEFAULT 'plan'",
+    "ALTER TABLE tasks ADD COLUMN notify_policy TEXT NOT NULL DEFAULT 'calendar_only'",
+    "ALTER TABLE tasks ADD COLUMN weather_sensitive INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE tasks ADD COLUMN reminder_profile TEXT",
+    "ALTER TABLE tasks ADD COLUMN source TEXT",
+    "ALTER TABLE tasks ADD COLUMN apple_snapshot TEXT",
+    "ALTER TABLE tasks ADD COLUMN apple_external_id TEXT",
+    "ALTER TABLE tasks ADD COLUMN conflict_state TEXT",
+    "ALTER TABLE tasks ADD COLUMN conflict_metadata TEXT",
 ]
 
 
@@ -153,6 +209,8 @@ def reset_db() -> None:
     conn = get_db()
     try:
         conn.execute("DROP TABLE IF EXISTS sync_logs")
+        conn.execute("DROP TABLE IF EXISTS notification_log")
+        conn.execute("DROP TABLE IF EXISTS weather_cache")
         conn.execute("DROP TABLE IF EXISTS sync_state")
         conn.execute("DROP TABLE IF EXISTS tasks")
         conn.executescript(SCHEMA_SQL)
