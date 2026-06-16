@@ -164,6 +164,46 @@ class TestTaskResponseSyncFields:
             if t["task_id"] == task2["task_id"]:
                 assert t["last_sync_status"] == "synced"
 
+    def test_failed_sync_status_enriched_from_sqlite(self):
+        task = _create_calendar_task(sync_enabled=True, title="Failed sync test")
+        sync = get_db().execute(
+            "SELECT * FROM sync_state WHERE task_id = ? AND sync_target = 'apple_calendar'",
+            (task["task_id"],),
+        ).fetchone()
+        assert sync is not None
+        get_db().execute(
+            "UPDATE sync_state SET sync_status = 'failed' WHERE sync_id = ?",
+            (sync["sync_id"],),
+        )
+        get_db().commit()
+
+        resp = client.get(f"/api/tasks/{task['task_id']}", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        assert resp.json()["last_sync_status"] == "failed"
+
+        list_resp = client.get("/api/tasks", headers=AUTH_HEADER)
+        assert list_resp.status_code == 200
+        listed = next(t for t in list_resp.json()["tasks"] if t["task_id"] == task["task_id"])
+        assert listed["last_sync_status"] == "failed"
+
+    @pytest.mark.parametrize("sync_status", ["pending", "synced", "stale", "failed"])
+    def test_sync_status_enrichment_regression(self, sync_status):
+        task = _create_calendar_task(sync_enabled=True, title=f"Status {sync_status}")
+        sync = get_db().execute(
+            "SELECT * FROM sync_state WHERE task_id = ? AND sync_target = 'apple_calendar'",
+            (task["task_id"],),
+        ).fetchone()
+        assert sync is not None
+        get_db().execute(
+            "UPDATE sync_state SET sync_status = ?, external_id = COALESCE(external_id, 'event-001') WHERE sync_id = ?",
+            (sync_status, sync["sync_id"]),
+        )
+        get_db().commit()
+
+        resp = client.get(f"/api/tasks/{task['task_id']}", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        assert resp.json()["last_sync_status"] == sync_status
+
     def test_task_without_sync_state_has_null_last_sync_status(self):
         resp = client.post(
             "/api/tasks",
@@ -337,6 +377,15 @@ class TestFrontendServing:
         archive_fn = content[archive_start:archive_end]
         assert "status: 'cancelled'" in archive_fn
         assert "confirmDeleteTask" not in archive_fn
+
+    def test_frontend_failed_sync_state_copy_is_chinese_and_actionable(self):
+        resp = client.get("/frontend/static/app.js")
+        assert resp.status_code == 200
+        content = resp.text
+        assert "failed: '同步失败'" in content
+        assert "需要重新同步" in content
+        assert "已保留在本地，等待处理" in content
+        assert "同步失败" in content
 
     def test_frontend_style_served(self):
         resp = client.get("/frontend/static/style.css")

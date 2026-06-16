@@ -555,6 +555,13 @@ html, body {
   color: var(--color-chip-skipped);
 }
 
+.sync-status-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.45;
+}
+
 .status-chip.status-pending {
   background: #e6f0ff;
   color: var(--color-chip-pending);

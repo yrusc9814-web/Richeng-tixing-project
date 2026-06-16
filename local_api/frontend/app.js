@@ -17,8 +17,8 @@ const STATUS_SYNC_LABELS = {
   pending: '待同步',
   in_progress: '同步中',
   synced: '已同步',
-  failed: '失败',
-  failed_permanent: '永久失败',
+  failed: '同步失败',
+  failed_permanent: '同步永久失败',
   skipped: '已跳过',
   stale: '已过期',
   orphaned: '已孤立',
@@ -123,6 +123,19 @@ function getScheduleTypeLabel(value) {
 
 function getNotifyPolicyLabel(value) {
   return NOTIFY_POLICY_LABELS[value] || value || '-';
+}
+
+function getSyncStatusHint(status) {
+  if (status === 'failed' || status === 'failed_permanent') {
+    return '需要重新同步；已保留在本地，等待处理';
+  }
+  if (status === 'stale') {
+    return '本地内容已更新，需要重新同步';
+  }
+  if (status === 'pending' || status === 'in_progress') {
+    return '等待同步到目标日历';
+  }
+  return '';
 }
 
 async function apiFetch(path, options) {
@@ -374,7 +387,7 @@ function renderSyncSummary() {
     <div class="sync-summary-item"><span>已同步</span><span class="sync-count" style="color:var(--color-chip-synced)">${synced}</span></div>
     <div class="sync-summary-item"><span>待同步</span><span class="sync-count" style="color:var(--color-chip-pending)">${pending}</span></div>
     <div class="sync-summary-item"><span>已过期</span><span class="sync-count" style="color:var(--color-chip-stale)">${stale}</span></div>
-    <div class="sync-summary-item"><span>失败</span><span class="sync-count" style="color:var(--color-chip-failed)">${failed}</span></div>
+    <div class="sync-summary-item"><span>同步失败</span><span class="sync-count" style="color:var(--color-chip-failed)">${failed}</span></div>
     <div class="sync-summary-item"><span>未同步</span><span class="sync-count" style="color:var(--color-chip-skipped)">${notSynced}</span></div>
   `;
 }
@@ -484,7 +497,8 @@ function viewTask(taskId) {
     $('#detail-timezone').textContent = task.timezone;
     $('#detail-location').textContent = task.location || '-';
     $('#detail-channel').textContent = task.created_channel;
-    $('#detail-sync').innerHTML = `<span class="status-chip ${syncStatus}">${STATUS_SYNC_LABELS[syncStatus] || syncStatus}</span>`;
+    const syncHint = getSyncStatusHint(syncStatus);
+    $('#detail-sync').innerHTML = `<span class="status-chip ${syncStatus}">${STATUS_SYNC_LABELS[syncStatus] || syncStatus}</span>${syncHint ? `<div class="sync-status-hint">${escapeHtml(syncHint)}</div>` : ''}`;
     $('#detail-sync-target').textContent = task.sync_enabled ? syncTargets : '未启用';
     $('#detail-created').textContent = formatDatetime(task.created_at);
     $('#detail-updated').textContent = formatDatetime(task.updated_at);
