@@ -96,6 +96,39 @@ html, body {
   padding: 12px 0;
 }
 
+.sidebar-section {
+  padding: 12px 0 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.sidebar-section-title {
+  padding: 0 20px 8px;
+  font-size: 12px;
+  color: rgba(255,255,255,0.5);
+  letter-spacing: 0.04em;
+}
+
+.sidebar-filter {
+  margin: 0 12px 6px 12px;
+  padding: 9px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition);
+  color: var(--color-sidebar-text);
+  font-size: 13px;
+}
+
+.sidebar-filter:hover {
+  background: var(--color-sidebar-hover);
+  color: #e0e4f0;
+}
+
+.sidebar-filter.active {
+  background: linear-gradient(90deg, rgba(78,122,245,0.25), rgba(78,122,245,0.08));
+  color: #fff;
+  border: 1px solid rgba(78,122,245,0.45);
+}
+
 .nav-item {
   display: flex;
   align-items: center;

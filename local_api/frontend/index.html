@@ -14,16 +14,27 @@
         <div class="logo-icon">L</div>
         <span>LifeSync Hub</span>
       </div>
-      <nav class="sidebar-nav">
-        <div class="nav-item active"><span class="nav-icon">📅</span> 日程</div>
-        <div class="nav-item" onclick="showCreateModal()"><span class="nav-icon">➕</span> 创建日程</div>
-        <div class="nav-item"><span class="nav-icon">📋</span> 任务管理</div>
-        <div class="nav-item"><span class="nav-icon">🔄</span> 同步状态</div>
-        <div class="nav-item"><span class="nav-icon">⚙️</span> 日历设置</div>
-        <div class="nav-item"><span class="nav-icon">🔧</span> 系统设置</div>
-        <div class="nav-item"><span class="nav-icon">📝</span> 日志</div>
-        <div class="nav-item"><span class="nav-icon">ℹ️</span> 关于</div>
-      </nav>
+        <div class="sidebar-section">
+          <div class="sidebar-section-title">日程筛选</div>
+          <div class="sidebar-filter active" data-tab="all">全部日程</div>
+          <div class="sidebar-filter" data-tab="today">今日日程</div>
+          <div class="sidebar-filter" data-tab="upcoming">即将开始</div>
+          <div class="sidebar-filter" data-tab="future">未来日程</div>
+          <div class="sidebar-filter" data-tab="archived">已归档</div>
+          <div class="sidebar-filter" data-tab="sync-error">同步异常</div>
+        </div>
+
+        <nav class="sidebar-nav">
+          <div class="nav-item active" data-nav="schedule"><span class="nav-icon">📅</span> 日程</div>
+          <div class="nav-item" onclick="showCreateModal()"><span class="nav-icon">➕</span> 创建日程</div>
+          <div class="nav-item" data-nav="tasks"><span class="nav-icon">📋</span> 任务管理</div>
+          <div class="nav-item" data-nav="sync"><span class="nav-icon">🔄</span> 同步状态</div>
+          <div class="nav-item" data-nav="calendar-settings"><span class="nav-icon">⚙️</span> 日历设置</div>
+          <div class="nav-item" data-nav="system-settings"><span class="nav-icon">🔧</span> 系统设置</div>
+          <div class="nav-item" data-nav="logs"><span class="nav-icon">📝</span> 日志</div>
+          <div class="nav-item" data-nav="about"><span class="nav-icon">ℹ️</span> 关于</div>
+        </nav>
+
       <div class="sidebar-footer">
         <div class="system-status-card">
           <div class="status-row">
@@ -109,12 +120,15 @@
               <table class="data-table">
                 <thead>
                   <tr>
-                    <th style="width:22%">标题</th>
-                    <th style="width:16%">开始时间</th>
-                    <th style="width:16%">结束时间</th>
-                    <th style="width:12%">同步状态</th>
-                    <th style="width:12%">同步目标</th>
-                    <th style="width:22%">操作</th>
+                    <th style="width:18%">标题</th>
+                    <th style="width:13%">开始时间</th>
+                    <th style="width:13%">结束时间</th>
+                    <th style="width:12%">地点</th>
+                    <th style="width:9%">任务状态</th>
+                    <th style="width:10%">同步状态</th>
+                    <th style="width:10%">同步目标</th>
+                    <th style="width:12%">更新时间</th>
+                    <th style="width:13%">操作</th>
                   </tr>
                 </thead>
                 <tbody id="table-body"></tbody>

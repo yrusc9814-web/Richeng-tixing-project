@@ -116,6 +116,30 @@ class TestTaskResponseSyncFields:
         assert "sync_targets" in task
         assert "last_sync_status" in task
 
+    def test_list_response_has_schedule_table_fields(self):
+        created = _create_calendar_task(sync_enabled=True, title="Table field test")
+        client.patch(
+            f"/api/tasks/{created['task_id']}",
+            json={"location": "Conference Room"},
+            headers=AUTH_HEADER,
+        )
+
+        resp = client.get("/api/tasks", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        task = next(t for t in resp.json()["tasks"] if t["task_id"] == created["task_id"])
+        for field in (
+            "title",
+            "start_time",
+            "due_time",
+            "location",
+            "status",
+            "last_sync_status",
+            "sync_targets",
+            "updated_at",
+        ):
+            assert field in task
+        assert task["location"] == "Conference Room"
+
     def test_last_sync_status_enriched_from_sync_state(self):
         task = _create_calendar_task(sync_enabled=True, title="Enrich test")
         _mark_synced(task["task_id"], external_id="enrich-test-001")
@@ -296,6 +320,23 @@ class TestFrontendServing:
         assert "LifeSync Hub" in content
         # Token should be injected
         assert "test-token-hermes-local-4.3" in content
+
+    def test_frontend_table_contains_required_schedule_columns(self):
+        resp = client.get("/frontend/")
+        assert resp.status_code == 200
+        content = resp.text
+        for header in ("标题", "开始时间", "结束时间", "地点", "任务状态", "同步状态", "同步目标", "更新时间"):
+            assert header in content
+
+    def test_frontend_archive_uses_cancelled_status_not_delete(self):
+        resp = client.get("/frontend/static/app.js")
+        assert resp.status_code == 200
+        content = resp.text
+        archive_start = content.index("async function archiveTask")
+        archive_end = content.index("// ── Confirm Dialog ───────────────────────────────────────────────────────")
+        archive_fn = content[archive_start:archive_end]
+        assert "status: 'cancelled'" in archive_fn
+        assert "confirmDeleteTask" not in archive_fn
 
     def test_frontend_style_served(self):
         resp = client.get("/frontend/static/style.css")

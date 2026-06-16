@@ -39,6 +39,7 @@ let currentPage = 0;
 const PAGE_SIZE = 50;
 let searchQuery = '';
 let currentFormMode = 'view'; // 'view', 'edit', 'create'
+let selectedTaskId = null;
 
 // ── Utility Functions ────────────────────────────────────────────────────
 
@@ -145,10 +146,6 @@ async function updateTask(taskId, data) {
   });
 }
 
-async function deleteTask(taskId) {
-  return apiFetch(`/api/tasks/${taskId}`, { method: 'DELETE' });
-}
-
 async function completeTask(taskId) {
   return apiFetch(`/api/tasks/${taskId}/complete`, { method: 'POST' });
 }
@@ -205,6 +202,10 @@ function filterTasks(tab) {
     filtered.sort((a, b) => (a.start_time || a.due_time || '').localeCompare(b.start_time || b.due_time || ''));
   } else if (tab === 'future') {
     filtered = filtered.filter(t => (t.start_time && isFuture(t.start_time)) || (t.due_time && isFuture(t.due_time)));
+  } else if (tab === 'archived') {
+    filtered = filtered.filter(t => t.status === 'cancelled');
+  } else if (tab === 'sync-error') {
+    filtered = filtered.filter(t => ['failed', 'failed_permanent', 'stale'].includes(t.last_sync_status));
   }
 
   // Apply search
@@ -256,23 +257,30 @@ function renderTable() {
     const syncTargetDisplay = task.sync_enabled ? syncTargets : '-';
 
     return `
-      <tr>
+      <tr class="${task.task_id === selectedTaskId ? 'selected' : ''}" onclick="selectTaskRow('${task.task_id}')">
         <td class="task-title" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</td>
         <td class="time-cell">${formatDatetime(task.start_time)}</td>
         <td class="time-cell">${formatDatetime(task.due_time)}</td>
+        <td class="location-cell" title="${escapeHtml(task.location || '')}">${escapeHtml(task.location || '-')}</td>
+        <td>${getStatusChipHtml(task.status, 'task')}</td>
         <td>${getStatusChipHtml(syncStatus, 'sync')}</td>
         <td style="font-size:12px">${escapeHtml(syncTargetDisplay)}</td>
+        <td class="time-cell">${formatDatetime(task.updated_at)}</td>
         <td class="actions-cell">
-          <button class="btn-icon" onclick="viewTask('${task.task_id}')" title="查看">👁</button>
-          <button class="btn-icon" onclick="editTask('${task.task_id}')" title="编辑">✏️</button>
-          <button class="btn-icon" onclick="archiveTask('${task.task_id}')" title="归档">📦</button>
-          <button class="btn-icon" onclick="confirmDeleteTask('${task.task_id}')" title="删除" style="color:var(--color-danger)">🗑</button>
+          <button class="btn-icon" onclick="event.stopPropagation(); viewTask('${task.task_id}')" title="查看">👁</button>
+          <button class="btn-icon" onclick="event.stopPropagation(); editTask('${task.task_id}')" title="编辑">✏️</button>
+          <button class="btn-icon" onclick="event.stopPropagation(); archiveTask('${task.task_id}')" title="归档">📦</button>
         </td>
       </tr>
     `;
   }).join('');
 
   renderPagination(filtered.length);
+}
+
+function selectTaskRow(taskId) {
+  selectedTaskId = taskId;
+  renderTable();
 }
 
 function renderPagination(total) {
@@ -504,25 +512,6 @@ async function archiveTask(taskId) {
   );
 }
 
-function confirmDeleteTask(taskId) {
-  showConfirm(
-    '删除任务',
-    '确定要永久删除此任务吗？此操作不可撤销。',
-    async () => {
-      showLoading(true);
-      try {
-        await deleteTask(taskId);
-        showToast('任务已删除', 'success');
-        await refreshTasks();
-      } catch (err) {
-        showToast('删除失败: ' + err.message, 'error');
-      } finally {
-        showLoading(false);
-      }
-    }
-  );
-}
-
 // ── Confirm Dialog ───────────────────────────────────────────────────────
 
 function showConfirm(title, message, onConfirm) {
@@ -608,6 +597,7 @@ async function saveCreate() {
 function switchTab(tab) {
   currentTab = tab;
   $$('.tab-item').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+  $$('.sidebar-filter').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
   renderTable();
 }
 
