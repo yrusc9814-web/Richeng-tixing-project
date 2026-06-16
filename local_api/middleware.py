@@ -19,7 +19,9 @@ from .config import API_TOKEN
 from .validators import check_forbidden_fields, check_status, deep_check_body
 
 # Paths that don't require authentication
-PUBLIC_PATHS = frozenset({"/health"})
+PUBLIC_PATHS = frozenset({"/health", "/frontend"})
+# Path prefixes that don't require authentication
+PUBLIC_PATH_PREFIXES = frozenset({"/frontend/", "/static/"})
 
 logger = logging.getLogger("local_api.middleware")
 
@@ -50,6 +52,8 @@ class AuthAndValidationMiddleware(BaseHTTPMiddleware):
 
         # ── 0. Public path bypass ────────────────────────────────────────
         if request.url.path in PUBLIC_PATHS:
+            return await call_next(request)
+        if any(request.url.path.startswith(prefix) for prefix in PUBLIC_PATH_PREFIXES):
             return await call_next(request)
 
         # ── 1. Token validation ─────────────────────────────────────────

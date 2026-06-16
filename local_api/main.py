@@ -6,12 +6,16 @@ Start with:
 """
 
 import logging
+import json
+from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import config
-from .config import API_HOST, API_PORT, ACCESS_LOG_PATH
+from .config import API_HOST, API_PORT, ACCESS_LOG_PATH, API_TOKEN
 from .database import init_db, close_db
 from .middleware import AuthAndValidationMiddleware
 from .routers import (
@@ -98,6 +102,29 @@ app.include_router(system_router)
 app.include_router(sync_router)
 app.include_router(sync_logs_router)
 app.include_router(sync_routes_router)
+
+
+# ── Frontend static files (Phase57) ────────────────────────────────────────
+
+FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
+FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
+
+# Mount frontend static assets (CSS, JS, images) under /frontend/static/
+if FRONTEND_DIR.exists():
+    app.mount("/frontend/static", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend_static")
+
+
+@app.get("/frontend/", include_in_schema=False)
+@app.get("/frontend", include_in_schema=False)
+async def serve_frontend(request: Request):
+    """Serve the Phase57 frontend with the API token injected."""
+    index_path = FRONTEND_DIR / "index.html"
+    if not index_path.exists():
+        return HTMLResponse("<h1>Frontend not yet built</h1><p>Run Phase57 to create local_api/frontend/index.html</p>")
+    html = index_path.read_text(encoding="utf-8")
+    # Inject API token for the frontend JS to use
+    html = html.replace("__API_TOKEN__", API_TOKEN)
+    return HTMLResponse(html)
 
 
 # ── Health check without auth (for convenience during dev) ─────────────────

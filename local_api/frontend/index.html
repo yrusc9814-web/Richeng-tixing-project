@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>日程管理 — LifeSync Hub</title>
+  <link rel="stylesheet" href="/frontend/static/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- ── Sidebar ───────────────────────────────────────────────── -->
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <div class="logo-icon">L</div>
+        <span>LifeSync Hub</span>
+      </div>
+      <nav class="sidebar-nav">
+        <div class="nav-item active"><span class="nav-icon">📅</span> 日程</div>
+        <div class="nav-item" onclick="showCreateModal()"><span class="nav-icon">➕</span> 创建日程</div>
+        <div class="nav-item"><span class="nav-icon">📋</span> 任务管理</div>
+        <div class="nav-item"><span class="nav-icon">🔄</span> 同步状态</div>
+        <div class="nav-item"><span class="nav-icon">⚙️</span> 日历设置</div>
+        <div class="nav-item"><span class="nav-icon">🔧</span> 系统设置</div>
+        <div class="nav-item"><span class="nav-icon">📝</span> 日志</div>
+        <div class="nav-item"><span class="nav-icon">ℹ️</span> 关于</div>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="system-status-card">
+          <div class="status-row">
+            <span class="status-label">数据库</span>
+            <span class="status-value" id="sys-db-status">检查中...</span>
+          </div>
+          <div class="status-row">
+            <span class="status-label">任务数</span>
+            <span class="status-value" id="sys-task-count">-</span>
+          </div>
+          <div class="status-row">
+            <span class="status-label">API</span>
+            <span class="status-value">运行中</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── Main Content ──────────────────────────────────────────── -->
+    <main class="main-content">
+      <!-- Header -->
+      <header class="header">
+        <div class="header-left">
+          <div>
+            <div class="header-title">日程管理</div>
+            <div class="header-subtitle">LifeSync Hub 本地日程管理</div>
+          </div>
+        </div>
+        <div class="header-right">
+          <div class="runtime-status">
+            <span class="status-dot"></span>
+            <span>运行中</span>
+          </div>
+          <button class="btn" onclick="refreshTasks()">🔄 刷新</button>
+          <button class="btn btn-primary" onclick="showCreateModal()">➕ 创建日程</button>
+        </div>
+      </header>
+
+      <div class="content-body">
+        <!-- Top Cards -->
+        <div class="cards-row">
+          <div class="stat-card primary">
+            <div class="stat-icon">📅</div>
+            <div class="stat-value" id="stat-all">0</div>
+            <div class="stat-label">全部日程</div>
+          </div>
+          <div class="stat-card success">
+            <div class="stat-icon">📌</div>
+            <div class="stat-value" id="stat-today">0</div>
+            <div class="stat-label">今日日程</div>
+          </div>
+          <div class="stat-card warning">
+            <div class="stat-icon">⏰</div>
+            <div class="stat-value" id="stat-upcoming">0</div>
+            <div class="stat-label">即将开始</div>
+          </div>
+          <div class="stat-card info">
+            <div class="stat-icon">📆</div>
+            <div class="stat-value" id="stat-future">0</div>
+            <div class="stat-label">未来日程</div>
+          </div>
+        </div>
+
+        <!-- Content Area: Table + Info Panel -->
+        <div class="content-area">
+          <!-- Table Section -->
+          <section class="table-section">
+            <!-- Toolbar -->
+            <div class="table-toolbar">
+              <div class="tabs">
+                <button class="tab-item active" data-tab="all">全部</button>
+                <button class="tab-item" data-tab="today">今日日程</button>
+                <button class="tab-item" data-tab="upcoming">即将开始</button>
+                <button class="tab-item" data-tab="future">未来日程</button>
+              </div>
+              <div class="toolbar-right">
+                <input type="text" class="search-input" id="search-input" placeholder="搜索标题、描述、地点...">
+              </div>
+            </div>
+
+            <!-- Table -->
+            <div class="table-wrapper">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th style="width:22%">标题</th>
+                    <th style="width:16%">开始时间</th>
+                    <th style="width:16%">结束时间</th>
+                    <th style="width:12%">同步状态</th>
+                    <th style="width:12%">同步目标</th>
+                    <th style="width:22%">操作</th>
+                  </tr>
+                </thead>
+                <tbody id="table-body"></tbody>
+              </table>
+
+              <!-- Empty State -->
+              <div class="empty-state" id="empty-state" style="display:flex">
+                <div class="empty-icon">📋</div>
+                <div class="empty-text">暂无日程</div>
+                <div class="empty-hint">点击"创建日程"按钮添加新日程</div>
+              </div>
+            </div>
+
+            <!-- Pagination -->
+            <div class="table-pagination">
+              <span class="pagination-info" id="pagination-info">共 0 条</span>
+            </div>
+          </section>
+
+          <!-- Right Info Panel -->
+          <aside class="info-panel">
+            <!-- Calendar View -->
+            <div class="info-card">
+              <div class="info-card-header">
+                <span>📅 日历视图</span>
+              </div>
+              <div class="info-card-body calendar-mini" id="calendar-mini-body"></div>
+            </div>
+
+            <!-- Today's Schedule -->
+            <div class="info-card">
+              <div class="info-card-header">
+                <span>📌 今日日程</span>
+              </div>
+              <div class="info-card-body" id="info-today-list"></div>
+            </div>
+
+            <!-- Upcoming -->
+            <div class="info-card">
+              <div class="info-card-header">
+                <span>⏰ 即将开始</span>
+              </div>
+              <div class="info-card-body" id="info-upcoming-list"></div>
+            </div>
+
+            <!-- Sync Status -->
+            <div class="info-card">
+              <div class="info-card-header">
+                <span>🔄 同步状态</span>
+              </div>
+              <div class="info-card-body">
+                <div class="sync-status-summary" id="sync-summary"></div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- ── Modal ─────────────────────────────────────────────────────── -->
+  <div class="modal-overlay" id="modal-overlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modal-title">任务详情</h3>
+        <button class="modal-close" onclick="showModal(false)">&times;</button>
+      </div>
+      <div class="modal-body">
+        <!-- View Mode -->
+        <div id="view-detail">
+          <div class="form-group" style="display:none">
+            <div class="form-label">任务ID</div>
+            <div id="detail-task-id" style="padding:4px 0;color:var(--color-text-secondary);font-size:12px"></div>
+          </div>
+          <div class="form-group">
+            <div class="form-label">标题</div>
+            <div id="detail-title" style="font-size:15px;font-weight:600;padding:4px 0"></div>
+          </div>
+          <div class="form-group">
+            <div class="form-label">描述</div>
+            <div id="detail-description" style="padding:4px 0;color:var(--color-text-secondary)"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <div class="form-label">优先级</div>
+              <div id="detail-priority" style="padding:4px 0"></div>
+            </div>
+            <div class="form-group">
+              <div class="form-label">状态</div>
+              <div id="detail-status" style="padding:4px 0"></div>
+            </div>
+          </div>
+          <div class="form-group">
+            <div class="form-label">时间</div>
+            <div id="detail-time" style="padding:4px 0;color:var(--color-text-secondary)"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <div class="form-label">时区</div>
+              <div id="detail-timezone" style="padding:4px 0"></div>
+            </div>
+            <div class="form-group">
+              <div class="form-label">地点</div>
+              <div id="detail-location" style="padding:4px 0"></div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <div class="form-label">来源</div>
+              <div id="detail-channel" style="padding:4px 0"></div>
+            </div>
+            <div class="form-group">
+              <div class="form-label">同步状态</div>
+              <div id="detail-sync" style="padding:4px 0"></div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <div class="form-label">同步目标</div>
+              <div id="detail-sync-target" style="padding:4px 0"></div>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <div class="form-label">创建时间</div>
+              <div id="detail-created" style="padding:4px 0;color:var(--color-text-secondary);font-size:12px"></div>
+            </div>
+            <div class="form-group">
+              <div class="form-label">更新时间</div>
+              <div id="detail-updated" style="padding:4px 0;color:var(--color-text-secondary);font-size:12px"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Edit/Create Mode -->
+        <div id="edit-form" style="display:none">
+          <input type="hidden" id="edit-task-id">
+          <div class="form-group">
+            <label class="form-label">标题 *</label>
+            <input type="text" class="form-input" id="edit-title" placeholder="输入日程标题" maxlength="500">
+          </div>
+          <div class="form-group">
+            <label class="form-label">描述</label>
+            <textarea class="form-textarea" id="edit-description" placeholder="输入描述（可选）" maxlength="5000"></textarea>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">优先级</label>
+              <select class="form-select" id="edit-priority">
+                <option value="P0">P0 — 紧急</option>
+                <option value="P1">P1 — 高</option>
+                <option value="P2" selected>P2 — 中</option>
+                <option value="P3">P3 — 低</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">时区</label>
+              <select class="form-select" id="edit-timezone">
+                <option value="Asia/Shanghai">Asia/Shanghai (UTC+8)</option>
+                <option value="Asia/Tokyo">Asia/Tokyo (UTC+9)</option>
+                <option value="America/New_York">America/New_York (UTC-5)</option>
+                <option value="Europe/London">Europe/London (UTC+0)</option>
+                <option value="UTC">UTC</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">开始时间</label>
+              <input type="datetime-local" class="form-input" id="edit-start-time">
+            </div>
+            <div class="form-group">
+              <label class="form-label">结束时间</label>
+              <input type="datetime-local" class="form-input" id="edit-due-time">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">地点</label>
+            <input type="text" class="form-input" id="edit-location" placeholder="输入地点（可选）" maxlength="500">
+          </div>
+          <div class="form-group">
+            <label class="form-checkbox">
+              <input type="checkbox" id="edit-sync-enabled">
+              启用 Calendar 同步
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-label">同步目标</label>
+            <input type="text" class="form-input" id="edit-sync-targets" placeholder="apple_calendar, apple_reminder">
+            <div style="font-size:11px;color:var(--color-text-light);margin-top:2px">多个目标用逗号分隔</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer" id="modal-footer" style="display:none">
+        <button class="btn" onclick="showModal(false)">取消</button>
+        <button class="btn btn-primary" onclick="currentFormMode === 'create' ? saveCreate() : saveEdit()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Confirm Dialog ────────────────────────────────────────────── -->
+  <div class="confirm-overlay" id="confirm-overlay">
+    <div class="confirm-dialog">
+      <div class="confirm-title" id="confirm-title">确认操作</div>
+      <div class="confirm-message" id="confirm-message">确定要执行此操作吗？</div>
+      <div class="confirm-actions">
+        <button class="btn" id="confirm-no">取消</button>
+        <button class="btn btn-danger" id="confirm-yes">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Loading ───────────────────────────────────────────────────── -->
+  <div class="loading-overlay" id="loading-overlay">
+    <div class="loading-spinner"></div>
+  </div>
+
+  <!-- ── Toast ─────────────────────────────────────────────────────── -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script>window.__API_TOKEN__ = '__API_TOKEN__';</script>
+  <script src="/frontend/static/app.js"></script>
+</body>
+</html>

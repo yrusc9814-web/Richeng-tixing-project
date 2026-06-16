@@ -91,6 +91,8 @@ class TaskUpdateRequest(BaseModel):
     need_weather_check: Optional[bool] = Field(default=None)
     reminder_channels: Optional[list[str]] = Field(default=None)
     created_channel: Optional[str] = Field(default=None)
+    sync_enabled: Optional[bool] = Field(default=None)
+    sync_targets: Optional[list[str]] = Field(default=None)
 
     @field_validator("priority")
     @classmethod
@@ -150,7 +152,10 @@ class TaskUpdateRequest(BaseModel):
 
 
 class TaskResponse(BaseModel):
-    """15-field response — serialised for all task endpoints."""
+    """18-field response — serialised for all task endpoints.
+
+    Phase57 additions: sync_enabled, sync_targets, last_sync_status.
+    """
     task_id: str
     title: str
     description: Optional[str] = None
@@ -163,6 +168,9 @@ class TaskResponse(BaseModel):
     need_weather_check: bool = False
     reminder_channels: list = ["local_ui"]
     created_channel: str
+    sync_enabled: bool = False
+    sync_targets: list = ["apple_calendar"]
+    last_sync_status: Optional[str] = None
     created_at: str
     updated_at: str
 

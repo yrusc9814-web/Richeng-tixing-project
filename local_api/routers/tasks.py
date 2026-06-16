@@ -41,7 +41,10 @@ def _iso_now() -> str:
 
 
 def _row_to_response(row) -> TaskResponse:
-    """Convert a sqlite3.Row to a TaskResponse dict, then validate."""
+    """Convert a sqlite3.Row to a TaskResponse dict, then validate.
+
+    Phase57: also extracts sync_enabled, sync_targets, last_sync_status.
+    """
     d = dict(row)
     # Parse JSON fields
     if isinstance(d.get("reminder_channels"), str):
@@ -49,8 +52,57 @@ def _row_to_response(row) -> TaskResponse:
             d["reminder_channels"] = json.loads(d["reminder_channels"])
         except (json.JSONDecodeError, TypeError):
             d["reminder_channels"] = ["local_ui"]
+    if isinstance(d.get("sync_targets"), str):
+        try:
+            d["sync_targets"] = json.loads(d["sync_targets"])
+        except (json.JSONDecodeError, TypeError):
+            d["sync_targets"] = ["apple_calendar"]
     d["need_weather_check"] = bool(d.get("need_weather_check", False))
+    d["sync_enabled"] = bool(d.get("sync_enabled", False))
+    # last_sync_status may be enriched later by _enrich_tasks_with_sync_info
     return TaskResponse(**d)
+
+
+def _enrich_tasks_with_sync_info(tasks: list[TaskResponse]) -> list[TaskResponse]:
+    """Batch-query sync_state for listed tasks and populate last_sync_status.
+
+    Uses a single query instead of N+1 lookups. Only queries apple_calendar
+    sync states since that is the primary sync target displayed in the UI.
+    """
+    task_ids = [t.task_id for t in tasks if t.sync_enabled]
+    if not task_ids:
+        return tasks
+
+    conn = get_db()
+    placeholders = ",".join("?" * len(task_ids))
+    sync_rows = conn.execute(
+        f"""SELECT ss.task_id, ss.sync_target, ss.sync_status, ss.last_synced_at
+            FROM sync_state ss
+            WHERE ss.task_id IN ({placeholders})
+            ORDER BY ss.created_at DESC""",
+        task_ids,
+    ).fetchall()
+
+    # Build map: task_id -> {sync_target -> sync_status}
+    sync_map: dict[str, dict[str, str]] = {}
+    for sr in sync_rows:
+        tid = sr["task_id"]
+        if tid not in sync_map:
+            sync_map[tid] = {}
+        target = sr["sync_target"]
+        if target not in sync_map[tid]:
+            # First (latest due to ORDER BY) entry per target wins
+            sync_map[tid][target] = sr["sync_status"]
+
+    enriched = []
+    for t in tasks:
+        t_dict = t.model_dump()
+        if t.task_id in sync_map:
+            cal_status = sync_map[t.task_id].get("apple_calendar")
+            if cal_status is not None:
+                t_dict["last_sync_status"] = cal_status
+        enriched.append(TaskResponse(**t_dict))
+    return enriched
 
 
 def _task_to_eligibility_dict(row) -> dict:
@@ -303,7 +355,9 @@ def create_task(request: Request, body: TaskCreateRequest):
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
     _ensure_pending_calendar_sync_state_if_eligible(_task_to_eligibility_dict(row))
     logger.info("task_created task_id=%s title=REDACTED request_id=%s", task_id, getattr(request.state, "request_id", "?"))
-    return _row_to_response(row)
+    result = _row_to_response(row)
+    enriched = _enrich_tasks_with_sync_info([result])
+    return enriched[0] if enriched else result
 
 
 # ── GET /api/tasks ─────────────────────────────────────────────────────────
@@ -350,6 +404,7 @@ def list_tasks(
     ).fetchall()
 
     tasks = [_row_to_response(r) for r in rows]
+    tasks = _enrich_tasks_with_sync_info(tasks)
     return TaskListResponse(tasks=tasks, total=total, limit=limit, offset=offset)
 
 
@@ -363,7 +418,10 @@ def get_task(request: Request, task_id: str):
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    return _row_to_response(row)
+    result = _row_to_response(row)
+    # Enrich single task with sync info
+    enriched = _enrich_tasks_with_sync_info([result])
+    return enriched[0] if enriched else result
 
 
 # ── PATCH /api/tasks/{task_id} ─────────────────────────────────────────────
@@ -394,6 +452,8 @@ def update_task(request: Request, task_id: str, body: TaskUpdateRequest):
         "need_weather_check": lambda v: 1 if v else 0,
         "reminder_channels": lambda v: json.dumps(v, ensure_ascii=False),
         "created_channel": lambda v: v,
+        "sync_enabled": lambda v: 1 if v else 0,
+        "sync_targets": lambda v: json.dumps(v, ensure_ascii=False),
     }
 
     update_data = body.model_dump(exclude_unset=True)
@@ -428,7 +488,9 @@ def update_task(request: Request, task_id: str, body: TaskUpdateRequest):
     if after_status == "cancelled":
         _cleanup_calendar_on_terminal(task_id)
     logger.info("task_updated task_id=%s request_id=%s", task_id, getattr(request.state, "request_id", "?"))
-    return _row_to_response(row)
+    result = _row_to_response(row)
+    enriched = _enrich_tasks_with_sync_info([result])
+    return enriched[0] if enriched else result
 
 
 # ── POST /api/tasks/{task_id}/complete ─────────────────────────────────────
@@ -456,7 +518,9 @@ def complete_task(request: Request, task_id: str):
     row = conn.execute("SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
     _cleanup_calendar_on_terminal(task_id)
     logger.info("task_completed task_id=%s request_id=%s", task_id, getattr(request.state, "request_id", "?"))
-    return _row_to_response(row)
+    result = _row_to_response(row)
+    enriched = _enrich_tasks_with_sync_info([result])
+    return enriched[0] if enriched else result
 
 
 # ── DELETE /api/tasks/{task_id} ──────────────────────────────────────────────
