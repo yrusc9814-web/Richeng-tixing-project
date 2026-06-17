@@ -562,6 +562,34 @@ html, body {
   line-height: 1.45;
 }
 
+.failed-detail-box {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius);
+  background: #fff1f0;
+}
+
+.failed-detail-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-danger);
+  margin-bottom: 4px;
+}
+
+.failed-detail-line {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
+.failed-detail-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-light);
+  line-height: 1.4;
+}
+
 .status-chip.status-pending {
   background: #e6f0ff;
   color: var(--color-chip-pending);
@@ -680,6 +708,14 @@ html, body {
 
 .calendar-mini {
   padding: 0;
+}
+
+.calendar-mini table td {
+  transition: background 0.15s ease;
+}
+
+.calendar-mini table td:hover {
+  background: var(--color-bg);
 }
 
 .calendar-mini-placeholder {

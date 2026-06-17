@@ -55,6 +55,7 @@ const PAGE_SIZE = 50;
 let searchQuery = '';
 let currentFormMode = 'view'; // 'view', 'edit', 'create'
 let selectedTaskId = null;
+let selectedDate = null; // ISO date string (YYYY-MM-DD) or null
 
 // ── Utility Functions ────────────────────────────────────────────────────
 
@@ -127,13 +128,32 @@ function getNotifyPolicyLabel(value) {
 
 function getSyncStatusHint(status) {
   if (status === 'failed' || status === 'failed_permanent') {
-    return '需要重新同步；已保留在本地，等待处理';
+    return '同步失败，需要重新同步；已保留在本地，等待处理';
   }
   if (status === 'stale') {
     return '本地内容已更新，需要重新同步';
   }
   if (status === 'pending' || status === 'in_progress') {
     return '等待同步到目标日历';
+  }
+  return '';
+}
+
+function getFailedDetailHtml(status, syncStatus) {
+  if (syncStatus === 'failed' || syncStatus === 'failed_permanent') {
+    return '<div class="failed-detail-box">'
+      + '<div class="failed-detail-title">⚠️ 同步失败</div>'
+      + '<div class="failed-detail-line">需要重新同步</div>'
+      + '<div class="failed-detail-line">已保留在本地，等待处理</div>'
+      + '<div class="failed-detail-note">系统将在下次同步周期自动重试，当前不影响本地操作</div>'
+      + '</div>';
+  }
+  if (syncStatus === 'stale') {
+    return '<div class="failed-detail-box">'
+      + '<div class="failed-detail-title">🔄 内容已过期</div>'
+      + '<div class="failed-detail-line">本地内容已更新，需要重新同步</div>'
+      + '<div class="failed-detail-note">编辑已保存到本地数据库，将安排重新同步到日历</div>'
+      + '</div>';
   }
   return '';
 }
@@ -239,15 +259,38 @@ function filterTasks(tab) {
   // Apply tab filter
   if (tab === 'today') {
     filtered = filtered.filter(t => isToday(t.start_time) || isToday(t.due_time));
+    filtered.sort((a, b) => (a.start_time || a.due_time || '').localeCompare(b.start_time || b.due_time || ''));
   } else if (tab === 'upcoming') {
     filtered = filtered.filter(t => (t.start_time && isUpcoming(t.start_time)) || (t.due_time && isUpcoming(t.due_time)));
     filtered.sort((a, b) => (a.start_time || a.due_time || '').localeCompare(b.start_time || b.due_time || ''));
   } else if (tab === 'future') {
     filtered = filtered.filter(t => (t.start_time && isFuture(t.start_time)) || (t.due_time && isFuture(t.due_time)));
+    filtered.sort((a, b) => (a.start_time || a.due_time || '').localeCompare(b.start_time || b.due_time || ''));
   } else if (tab === 'archived') {
     filtered = filtered.filter(t => t.status === 'cancelled');
+    filtered.sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
   } else if (tab === 'sync-error') {
     filtered = filtered.filter(t => ['failed', 'failed_permanent', 'stale'].includes(t.last_sync_status));
+  } else if (tab === 'failed') {
+    filtered = filtered.filter(t => ['failed', 'failed_permanent'].includes(t.last_sync_status));
+  } else if (tab === 'pending-sync') {
+    filtered = filtered.filter(t => ['pending', 'in_progress'].includes(t.last_sync_status));
+  } else if (tab === 'synced') {
+    filtered = filtered.filter(t => t.last_sync_status === 'synced');
+  } else if (tab === 'stale') {
+    filtered = filtered.filter(t => t.last_sync_status === 'stale');
+  } else {
+    // 'all' — exclude archived by default
+    filtered = filtered.filter(t => t.status !== 'cancelled');
+    filtered.sort((a, b) => (a.start_time || a.due_time || '').localeCompare(b.start_time || b.due_time || ''));
+  }
+
+  // Apply selected date filter (from calendar mini click)
+  if (selectedDate) {
+    filtered = filtered.filter(t => {
+      const taskDate = (t.start_time || t.due_time || '').substring(0, 10);
+      return taskDate === selectedDate;
+    });
   }
 
   // Apply search
@@ -264,10 +307,11 @@ function filterTasks(tab) {
 }
 
 function computeStats() {
-  const all = currentTasks.length;
-  const today = currentTasks.filter(t => isToday(t.start_time) || isToday(t.due_time)).length;
-  const upcoming = currentTasks.filter(t => (t.start_time && isUpcoming(t.start_time)) || (t.due_time && isUpcoming(t.due_time))).length;
-  const future = currentTasks.filter(t => (t.start_time && isFuture(t.start_time)) || (t.due_time && isFuture(t.due_time))).length;
+  const active = currentTasks.filter(t => t.status !== 'cancelled');
+  const all = active.length;
+  const today = active.filter(t => isToday(t.start_time) || isToday(t.due_time)).length;
+  const upcoming = active.filter(t => (t.start_time && isUpcoming(t.start_time)) || (t.due_time && isUpcoming(t.due_time))).length;
+  const future = active.filter(t => (t.start_time && isFuture(t.start_time)) || (t.due_time && isFuture(t.due_time))).length;
   return { all, today, upcoming, future };
 }
 
@@ -345,7 +389,7 @@ function renderInfoPanel() {
 }
 
 function renderTodayList() {
-  const todayTasks = currentTasks.filter(t => isToday(t.start_time) || isToday(t.due_time));
+  const todayTasks = currentTasks.filter(t => t.status !== 'cancelled' && (isToday(t.start_time) || isToday(t.due_time)));
   const container = $('#info-today-list');
   if (todayTasks.length === 0) {
     container.innerHTML = '<div style="padding:6px 0;font-size:12px;color:var(--color-text-light)">今日暂无日程</div>';
@@ -361,7 +405,7 @@ function renderTodayList() {
 
 function renderUpcomingList() {
   const upcomingTasks = currentTasks
-    .filter(t => (t.start_time && isUpcoming(t.start_time)) || (t.due_time && isUpcoming(t.due_time)))
+    .filter(t => t.status !== 'cancelled' && ((t.start_time && isUpcoming(t.start_time)) || (t.due_time && isUpcoming(t.due_time))))
     .sort((a, b) => (a.start_time || a.due_time || '').localeCompare(b.start_time || b.due_time || ''));
   const container = $('#info-upcoming-list');
   if (upcomingTasks.length === 0) {
@@ -377,11 +421,12 @@ function renderUpcomingList() {
 }
 
 function renderSyncSummary() {
-  const synced = currentTasks.filter(t => t.last_sync_status === 'synced').length;
-  const pending = currentTasks.filter(t => t.last_sync_status === 'pending' || t.last_sync_status === 'in_progress').length;
-  const stale = currentTasks.filter(t => t.last_sync_status === 'stale').length;
-  const failed = currentTasks.filter(t => t.last_sync_status === 'failed' || t.last_sync_status === 'failed_permanent').length;
-  const notSynced = currentTasks.filter(t => !t.last_sync_status || t.last_sync_status === 'not_synced').length;
+  const active = currentTasks.filter(t => t.status !== 'cancelled');
+  const synced = active.filter(t => t.last_sync_status === 'synced').length;
+  const pending = active.filter(t => t.last_sync_status === 'pending' || t.last_sync_status === 'in_progress').length;
+  const stale = active.filter(t => t.last_sync_status === 'stale').length;
+  const failed = active.filter(t => t.last_sync_status === 'failed' || t.last_sync_status === 'failed_permanent').length;
+  const notSynced = active.filter(t => !t.last_sync_status || t.last_sync_status === 'not_synced').length;
 
   $('#sync-summary').innerHTML = `
     <div class="sync-summary-item"><span>已同步</span><span class="sync-count" style="color:var(--color-chip-synced)">${synced}</span></div>
@@ -429,9 +474,26 @@ function renderWeatherSummary() {
 function renderCalendarMini() {
   const now = new Date();
   const days = ['日', '一', '二', '三', '四', '五', '六'];
-  const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).getDay();
-  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+  const firstDay = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
   const todayDate = now.getDate();
+  const todayStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(todayDate).padStart(2, '0')}`;
+
+  // Build set of dates that have tasks (from start_time or due_time)
+  const dateSet = new Set();
+  currentTasks.filter(t => t.status !== 'cancelled').forEach(t => {
+    if (t.start_time) dateSet.add(t.start_time.substring(0, 10));
+    if (t.due_time) dateSet.add(t.due_time.substring(0, 10));
+  });
+
+  const container = $('#calendar-mini-body');
+
+  if (!currentTasks.length) {
+    container.innerHTML = '<div class="calendar-mini-placeholder">暂无日程数据</div>';
+    return;
+  }
 
   let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;text-align:center">';
   html += '<thead><tr>' + days.map(d => `<th style="padding:4px;color:var(--color-text-light);font-weight:500">${d}</th>`).join('') + '</tr></thead><tbody><tr>';
@@ -439,14 +501,58 @@ function renderCalendarMini() {
     html += '<td style="padding:4px;color:var(--color-text-light)"></td>';
   }
   for (let d = 1; d <= daysInMonth; d++) {
-    const cls = d === todayDate ? ' style="padding:4px;background:var(--color-primary);color:#fff;border-radius:4px;font-weight:600"' : ' style="padding:4px"';
-    html += `<td${cls}>${d}</td>`;
+    const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    const isToday = d === todayDate;
+    const isSelected = selectedDate === dateStr;
+    const hasTask = dateSet.has(dateStr);
+
+    let style = 'padding:4px;cursor:pointer;border-radius:4px;';
+    if (isSelected) {
+      style += 'background:var(--color-primary);color:#fff;font-weight:600;';
+    } else if (isToday) {
+      style += 'background:var(--color-chip-pending);color:#fff;font-weight:600;';
+    } else if (hasTask) {
+      style += 'font-weight:500;';
+    }
+    const dot = hasTask && !isSelected ? '<span style="display:block;width:4px;height:4px;background:var(--color-primary);border-radius:50%;margin:1px auto 0"></span>' : '';
+    html += `<td onclick="selectCalendarDate('${dateStr}')" style="${style}">${d}${dot}</td>`;
     if ((firstDay + d) % 7 === 0 && d < daysInMonth) {
       html += '</tr><tr>';
     }
   }
   html += '</tr></tbody></table>';
-  $('#calendar-mini-body').innerHTML = html;
+  container.innerHTML = html;
+
+  // Show empty-state hint if a date is selected and no tasks match
+  if (selectedDate) {
+    const tasksOnDate = currentTasks.filter(t => {
+      const taskDate = (t.start_time || t.due_time || '').substring(0, 10);
+      return taskDate === selectedDate;
+    });
+    if (tasksOnDate.length === 0) {
+      const hint = document.createElement('div');
+      hint.className = 'calendar-mini-placeholder';
+      hint.textContent = `📅 ${selectedDate} 暂无日程`;
+      container.appendChild(hint);
+    }
+  }
+}
+
+// ── Calendar Date Selection ────────────────────────────────────────────
+
+function selectCalendarDate(dateStr) {
+  if (selectedDate === dateStr) {
+    // Toggle off
+    selectedDate = null;
+  } else {
+    selectedDate = dateStr;
+    // Reset tab to 'all' when selecting a date
+    currentTab = 'all';
+    $$('.tab-item').forEach(el => el.classList.toggle('active', el.dataset.tab === 'all'));
+    $$('.sidebar-filter').forEach(el => el.classList.toggle('active', el.dataset.tab === 'all'));
+  }
+  renderCalendarMini();
+  renderTable();
 }
 
 function renderSystemStatus() {
@@ -498,7 +604,8 @@ function viewTask(taskId) {
     $('#detail-location').textContent = task.location || '-';
     $('#detail-channel').textContent = task.created_channel;
     const syncHint = getSyncStatusHint(syncStatus);
-    $('#detail-sync').innerHTML = `<span class="status-chip ${syncStatus}">${STATUS_SYNC_LABELS[syncStatus] || syncStatus}</span>${syncHint ? `<div class="sync-status-hint">${escapeHtml(syncHint)}</div>` : ''}`;
+    const failedDetail = getFailedDetailHtml(task.status, syncStatus);
+    $('#detail-sync').innerHTML = `<span class="status-chip ${syncStatus}">${STATUS_SYNC_LABELS[syncStatus] || syncStatus}</span>${syncHint ? `<div class="sync-status-hint">${escapeHtml(syncHint)}</div>` : ''}${failedDetail}`;
     $('#detail-sync-target').textContent = task.sync_enabled ? syncTargets : '未启用';
     $('#detail-created').textContent = formatDatetime(task.created_at);
     $('#detail-updated').textContent = formatDatetime(task.updated_at);
@@ -694,9 +801,11 @@ async function saveCreate() {
 
 function switchTab(tab) {
   currentTab = tab;
+  selectedDate = null; // Clear calendar date selection on tab switch
   $$('.tab-item').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
   $$('.sidebar-filter').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
   renderTable();
+  renderCalendarMini(); // Re-render to clear selected date highlight
 }
 
 // ── Search ───────────────────────────────────────────────────────────────

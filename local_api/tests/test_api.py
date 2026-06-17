@@ -347,6 +347,342 @@ class TestListTasks:
         assert resp.status_code == 422
 
 
+class TestSearchTasks:
+    """GET /api/tasks?search=..."""
+
+    def test_search_by_title(self):
+        client.post("/api/tasks", json={"title": "Find me please", "description": "secret"}, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={"title": "Other task"}, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?search=Find", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+        assert all("Find" in t["title"] for t in data["tasks"])
+
+    def test_search_by_description(self):
+        client.post("/api/tasks", json={"title": "Desc search", "description": "unique-description-text"}, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={"title": "Something else"}, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?search=unique-description", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+
+    def test_search_by_location(self):
+        client.post("/api/tasks", json={"title": "Loc task", "location": "Tokyo Tower"}, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={"title": "Other"}, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?search=Tokyo", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+
+    def test_search_no_match(self):
+        resp = client.get("/api/tasks?search=zzzthisdoesnotexistzzz", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 0
+
+    def test_search_empty_query_returns_all(self):
+        client.post("/api/tasks", json={"title": "Task A"}, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={"title": "Task B"}, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?search=", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 2
+
+    def test_search_composes_with_status_filter(self):
+        client.post("/api/tasks", json={"title": "Meeting prep", "status": "pending"}, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={"title": "Meeting done", "status": "completed"}, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?search=Meeting&status=pending", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+        for t in data["tasks"]:
+            assert t["status"] == "pending"
+
+
+class TestDateFilterTasks:
+    """GET /api/tasks?start_date=...&end_date=..."""
+
+    def test_filter_by_start_date(self):
+        client.post("/api/tasks", json={
+            "title": "June task", "start_time": "2026-06-15T09:00:00+08:00", "due_time": "2026-06-15T10:00:00+08:00",
+        }, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={
+            "title": "July task", "start_time": "2026-07-01T09:00:00+08:00", "due_time": "2026-07-01T10:00:00+08:00",
+        }, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?start_date=2026-07-01", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+        for t in data["tasks"]:
+            assert t["start_time"] is not None and t["start_time"] >= "2026-07-01"
+
+    def test_filter_by_end_date(self):
+        client.post("/api/tasks", json={
+            "title": "Early", "start_time": "2026-06-01T09:00:00+08:00", "due_time": "2026-06-01T10:00:00+08:00",
+        }, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={
+            "title": "Late", "start_time": "2026-07-10T09:00:00+08:00", "due_time": "2026-07-10T10:00:00+08:00",
+        }, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?end_date=2026-06-30", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+        for t in data["tasks"]:
+            assert t["due_time"] is not None and t["due_time"] <= "2026-06-30"
+
+    def test_filter_by_date_range(self):
+        client.post("/api/tasks", json={
+            "title": "Mid", "start_time": "2026-06-15T09:00:00+08:00", "due_time": "2026-06-15T10:00:00+08:00",
+        }, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?start_date=2026-06-01&end_date=2026-07-31", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+
+
+class TestSortTasks:
+    """GET /api/tasks?sort_by=...&sort_order=..."""
+
+    def test_sort_by_start_time_asc(self):
+        client.post("/api/tasks", json={
+            "title": "Later", "start_time": "2026-07-01T09:00:00+08:00", "due_time": "2026-07-01T10:00:00+08:00",
+        }, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={
+            "title": "Earlier", "start_time": "2026-06-01T09:00:00+08:00", "due_time": "2026-06-01T10:00:00+08:00",
+        }, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?sort_by=start_time&sort_order=asc", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        if len(data["tasks"]) >= 2:
+            assert data["tasks"][0]["start_time"] <= data["tasks"][-1]["start_time"]
+
+    def test_sort_by_due_time_desc(self):
+        client.post("/api/tasks", json={
+            "title": "Old", "start_time": "2026-06-01T09:00:00+08:00", "due_time": "2026-06-01T10:00:00+08:00",
+        }, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={
+            "title": "New", "start_time": "2026-07-01T09:00:00+08:00", "due_time": "2026-07-01T10:00:00+08:00",
+        }, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?sort_by=due_time&sort_order=desc", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        if len(data["tasks"]) >= 2:
+            assert data["tasks"][0]["due_time"] >= data["tasks"][-1]["due_time"]
+
+    def test_sort_by_title(self):
+        client.post("/api/tasks", json={"title": "B task"}, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={"title": "A task"}, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?sort_by=title&sort_order=asc", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        if len(data["tasks"]) >= 2:
+            assert data["tasks"][0]["title"] <= data["tasks"][1]["title"]
+
+    def test_invalid_sort_column_falls_back_to_created_at(self):
+        resp = client.get("/api/tasks?sort_by=nonexistent_column&sort_order=asc", headers=AUTH_HEADER)
+        assert resp.status_code == 200  # Should not error, falls back to default
+
+    def test_default_sort_is_created_at_desc(self):
+        client.post("/api/tasks", json={"title": "First"}, headers=AUTH_HEADER)
+        client.post("/api/tasks", json={"title": "Second"}, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        if len(data["tasks"]) >= 2:
+            assert data["tasks"][0]["created_at"] >= data["tasks"][-1]["created_at"]
+
+
+class TestArchivedExclusion:
+    """Archived/cancelled tasks should not pollute active lists."""
+
+    def test_cancelled_excluded_from_list(self):
+        task = client.post("/api/tasks", json={"title": "Will cancel"}, headers=AUTH_HEADER).json()
+        client.patch(f"/api/tasks/{task['task_id']}", json={"status": "cancelled"}, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?status=pending", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert all(t["status"] != "cancelled" for t in data["tasks"])
+
+    def test_archived_filter_returns_cancelled(self):
+        task = client.post("/api/tasks", json={"title": "Archived"}, headers=AUTH_HEADER).json()
+        client.patch(f"/api/tasks/{task['task_id']}", json={"status": "cancelled"}, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?status=cancelled", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+        assert all(t["status"] == "cancelled" for t in data["tasks"])
+
+
+class TestSyncStatusFilterAPI:
+    """GET /api/tasks?sync_status=..."""
+
+    def _create_task_with_sync_state(self, title, sync_status_val):
+        resp = client.post("/api/tasks", json={
+            "title": title,
+            "start_time": "2026-06-01T09:00:00+08:00",
+            "due_time": "2026-06-01T10:00:00+08:00",
+            "sync_enabled": True,
+            "sync_targets": ["apple_calendar"],
+        }, headers=AUTH_HEADER)
+        assert resp.status_code == 201
+        task_id = resp.json()["task_id"]
+        # Update the sync_state directly
+        conn = get_db()
+        sync = conn.execute(
+            "SELECT * FROM sync_state WHERE task_id = ? AND sync_target = 'apple_calendar'",
+            (task_id,),
+        ).fetchone()
+        if sync:
+            conn.execute(
+                "UPDATE sync_state SET sync_status = ? WHERE sync_id = ?",
+                (sync_status_val, sync["sync_id"]),
+            )
+            conn.commit()
+        return task_id
+
+    def test_filter_by_sync_status_synced(self):
+        self._create_task_with_sync_state("Synced task", "synced")
+        resp = client.get("/api/tasks?sync_status=synced", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        if data["total"] > 0:
+            for t in data["tasks"]:
+                assert t["last_sync_status"] == "synced"
+
+    def test_filter_by_sync_status_failed(self):
+        self._create_task_with_sync_state("Failed task", "failed")
+        resp = client.get("/api/tasks?sync_status=failed", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        if data["total"] > 0:
+            for t in data["tasks"]:
+                assert t["last_sync_status"] == "failed"
+
+    def test_filter_by_sync_status_pending(self):
+        self._create_task_with_sync_state("Pending task", "pending")
+        resp = client.get("/api/tasks?sync_status=pending", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        if data["total"] > 0:
+            for t in data["tasks"]:
+                assert t["last_sync_status"] == "pending"
+
+    def test_filter_by_sync_status_stale(self):
+        self._create_task_with_sync_state("Stale task", "stale")
+        resp = client.get("/api/tasks?sync_status=stale", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        if data["total"] > 0:
+            for t in data["tasks"]:
+                assert t["last_sync_status"] == "stale"
+
+    def test_invalid_sync_status_filter(self):
+        resp = client.get("/api/tasks?sync_status=invalid_sync", headers=AUTH_HEADER)
+        assert resp.status_code == 422
+
+    def test_sync_status_not_synced(self):
+        # Tasks without sync_state should be "not_synced"
+        client.post("/api/tasks", json={"title": "No sync"}, headers=AUTH_HEADER)
+        resp = client.get("/api/tasks?sync_status=not_synced", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        if data["total"] > 0:
+            for t in data["tasks"]:
+                assert t["last_sync_status"] is None or t["last_sync_status"] == "not_synced"
+
+
+class TestAPIResponseStructure:
+    """Verify API response model includes all expected fields."""
+
+    def test_task_response_has_sync_fields(self):
+        resp = client.post("/api/tasks", json={
+            "title": "Response check",
+            "start_time": "2026-06-01T09:00:00+08:00",
+            "due_time": "2026-06-01T10:00:00+08:00",
+        }, headers=AUTH_HEADER)
+        assert resp.status_code == 201
+        data = resp.json()
+        expected = {
+            "task_id", "title", "description", "priority", "status",
+            "start_time", "due_time", "timezone", "location",
+            "need_weather_check", "schedule_type", "notify_policy",
+            "weather_sensitive", "reminder_profile", "reminder_channels",
+            "created_channel", "sync_enabled", "sync_targets",
+            "last_sync_status", "created_at", "updated_at",
+        }
+        assert expected.issubset(data.keys())
+
+    def test_list_response_has_pagination(self):
+        resp = client.get("/api/tasks", headers=AUTH_HEADER)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "tasks" in data
+        assert "total" in data
+        assert "limit" in data
+        assert "offset" in data
+
+    def test_list_response_works_with_all_new_params(self):
+        """All new query params together should not error."""
+        resp = client.get(
+            "/api/tasks?search=test&start_date=2026-01-01&end_date=2026-12-31&sort_by=start_time&sort_order=asc",
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 200
+        assert "tasks" in resp.json()
+
+    def test_list_response_supports_date_and_sort_aliases(self):
+        client.post(
+            "/api/tasks",
+            json={
+                "title": "Alias date task",
+                "description": "alias search marker",
+                "start_time": "2026-07-03T09:00:00+08:00",
+                "due_time": "2026-07-03T10:00:00+08:00",
+            },
+            headers=AUTH_HEADER,
+        )
+        resp = client.get(
+            "/api/tasks?search=alias&date=2026-07-03&sort=start_time&sort_order=asc",
+            headers=AUTH_HEADER,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+        assert all((task["start_time"] or task["due_time"] or "").startswith("2026-07-03") for task in data["tasks"])
+        assert any(task["title"] == "Alias date task" for task in data["tasks"])
+
+    def test_invalid_date_filter_returns_422(self):
+        resp = client.get("/api/tasks?date=not-a-date", headers=AUTH_HEADER)
+        assert resp.status_code == 422
+
+
+class TestFrontendCalendarMarkers:
+    """Verify frontend app.js contains calendar date interaction markers."""
+
+    FRONTEND_PATH = Path(__file__).resolve().parent.parent / "frontend" / "app.js"
+
+    def test_select_calendar_date_function_exists(self):
+        source = self.FRONTEND_PATH.read_text(encoding="utf-8")
+        assert "function selectCalendarDate" in source
+
+    def test_calendar_mini_renders_date_dots(self):
+        source = self.FRONTEND_PATH.read_text(encoding="utf-8")
+        assert "dateSet" in source or "hasTask" in source
+
+    def test_selected_date_state_variable_exists(self):
+        source = self.FRONTEND_PATH.read_text(encoding="utf-8")
+        assert "selectedDate" in source
+
+    def test_calendar_click_handler_in_table_cell(self):
+        source = self.FRONTEND_PATH.read_text(encoding="utf-8")
+        assert "selectCalendarDate" in source
+
+    def test_empty_state_hint_for_selected_date(self):
+        source = self.FRONTEND_PATH.read_text(encoding="utf-8")
+        assert "暂无日程" in source
+
+
 class TestGetTask:
     """GET /api/tasks/{task_id}"""
 

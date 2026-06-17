@@ -4,7 +4,7 @@ import json
 import time
 import secrets
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
 
@@ -13,7 +13,7 @@ from pydantic import ValidationError
 
 from ..database import get_db
 from ..models import TaskCreateRequest, TaskUpdateRequest, TaskResponse, TaskListResponse
-from ..config import MAX_LIMIT, DEFAULT_LIMIT, ALLOWED_PRIORITIES, ALLOWED_STATUSES
+from ..config import MAX_LIMIT, DEFAULT_LIMIT, ALLOWED_PRIORITIES, ALLOWED_STATUSES, ALLOWED_SYNC_STATUSES
 from ..services.sync_eligibility import eligible_for_calendar_sync
 from ..services.sync_log_service import create_sync_log
 from ..services.sync_state_service import (
@@ -38,6 +38,15 @@ def _generate_task_id() -> str:
 def _iso_now() -> str:
     """Return current time as ISO-8601 string with Asia/Shanghai timezone (+08:00)."""
     return datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+
+
+def _next_iso_date(date_value: str) -> str:
+    """Return the next YYYY-MM-DD boundary for a date filter."""
+    try:
+        parsed = datetime.strptime(date_value[:10], "%Y-%m-%d")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid date filter: {date_value}") from exc
+    return (parsed + timedelta(days=1)).date().isoformat()
 
 
 def _row_to_response(row) -> TaskResponse:
@@ -375,15 +384,34 @@ def create_task(request: Request, body: TaskCreateRequest):
 # ── GET /api/tasks ─────────────────────────────────────────────────────────
 
 
+_ALLOWED_SORT_COLUMNS = frozenset({
+    "created_at", "updated_at", "start_time", "due_time",
+    "title", "priority", "status",
+})
+
+
 @router.get("", response_model=TaskListResponse)
 def list_tasks(
     request: Request,
     status: Optional[str] = Query(default=None, description="Filter by status (pending/completed/cancelled)"),
     priority: Optional[str] = Query(default=None, description="Filter by priority (P0/P1/P2/P3)"),
+    search: Optional[str] = Query(default=None, description="Search in title, description, location"),
+    sync_status: Optional[str] = Query(default=None, description="Filter by sync_status (pending/in_progress/synced/failed/failed_permanent/skipped/stale/not_synced)"),
+    start_date: Optional[str] = Query(default=None, description="Filter: start_time >= this date/ISO datetime"),
+    end_date: Optional[str] = Query(default=None, description="Filter: due_time <= this date/ISO datetime"),
+    date: Optional[str] = Query(default=None, description="Filter tasks occurring on this YYYY-MM-DD date"),
+    sort: Optional[str] = Query(default=None, description="Alias for sort_by"),
+    sort_by: str = Query(default="created_at", description="Sort column (created_at, updated_at, start_time, due_time, title, priority, status)"),
+    sort_order: str = Query(default="desc", description="Sort order (asc/desc)"),
     limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Max tasks per page"),
     offset: int = Query(default=0, ge=0, description="Pagination offset"),
 ):
-    """List tasks with optional filters and pagination."""
+    """List tasks with optional filters and pagination.
+
+    New in Phase63: search (title/description/location LIKE), sync_status
+    (post-enrichment Python filter), date/start_date/end_date, sort/sort_by,
+    sort_order.
+    """
     conn = get_db()
 
     where_clauses = []
@@ -403,21 +431,76 @@ def list_tasks(
         where_clauses.append("priority = ?")
         params.append(priority_upper)
 
+    # Search across title, description, location
+    if search is not None and search.strip():
+        search_term = f"%{search.strip()}%"
+        where_clauses.append("(title LIKE ? OR description LIKE ? OR location LIKE ?)")
+        params.extend([search_term, search_term, search_term])
+
+    # Date range filters
+    if date is not None and date.strip():
+        date_value = date.strip()
+        where_clauses.append("((start_time >= ? AND start_time < ?) OR (due_time >= ? AND due_time < ?))")
+        next_day = _next_iso_date(date_value)
+        params.extend([date_value, next_day, date_value, next_day])
+
+    if start_date is not None:
+        where_clauses.append("start_time >= ?")
+        params.append(start_date)
+
+    if end_date is not None:
+        where_clauses.append("due_time <= ?")
+        params.append(end_date)
+
     where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
 
-    # Count
-    count_row = conn.execute(f"SELECT COUNT(*) as cnt FROM tasks WHERE {where_sql}", params).fetchone()
-    total = count_row["cnt"]
+    # Validate and apply sorting
+    effective_sort = sort or sort_by
+    sort_col = effective_sort if effective_sort in _ALLOWED_SORT_COLUMNS else "created_at"
+    sort_dir = "ASC" if sort_order.upper() == "ASC" else "DESC"
 
-    # Fetch page
-    rows = conn.execute(
-        f"SELECT * FROM tasks WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-        params + [limit, offset],
-    ).fetchall()
+    if sync_status is not None:
+        # sync_status requires post-enrichment filtering (it lives in sync_state table)
+        sync_status_val = sync_status.strip().lower()
+        allowed_sync_filters = set(ALLOWED_SYNC_STATUSES) | {"not_synced"}
+        if sync_status_val not in allowed_sync_filters:
+            raise HTTPException(status_code=422, detail=f"Invalid sync_status filter: {sync_status}")
 
-    tasks = [_row_to_response(r) for r in rows]
-    tasks = _enrich_tasks_with_sync_info(tasks)
-    return TaskListResponse(tasks=tasks, total=total, limit=limit, offset=offset)
+        # Fetch ALL matching tasks, enrich, then filter
+        rows = conn.execute(
+            f"SELECT * FROM tasks WHERE {where_sql} ORDER BY {sort_col} {sort_dir}",
+            params,
+        ).fetchall()
+
+        tasks = [_row_to_response(r) for r in rows]
+        tasks = _enrich_tasks_with_sync_info(tasks)
+
+        # Apply sync_status filter
+        if sync_status_val == "not_synced":
+            tasks = [t for t in tasks if t.last_sync_status is None or t.last_sync_status == "not_synced"]
+        else:
+            tasks = [t for t in tasks if (t.last_sync_status or "") == sync_status_val]
+
+        total = len(tasks)
+        paginated = tasks[offset:offset + limit]
+    else:
+        # Count
+        count_row = conn.execute(
+            f"SELECT COUNT(*) as cnt FROM tasks WHERE {where_sql}", params
+        ).fetchone()
+        total = count_row["cnt"]
+
+        # Fetch page
+        rows = conn.execute(
+            f"SELECT * FROM tasks WHERE {where_sql} ORDER BY {sort_col} {sort_dir} LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
+
+        tasks = [_row_to_response(r) for r in rows]
+        tasks = _enrich_tasks_with_sync_info(tasks)
+        paginated = tasks
+
+    return TaskListResponse(tasks=paginated, total=total, limit=limit, offset=offset)
 
 
 # ── GET /api/tasks/{task_id} ───────────────────────────────────────────────
