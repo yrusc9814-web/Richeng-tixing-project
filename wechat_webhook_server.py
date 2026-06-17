@@ -1,34 +1,37 @@
-import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
 
 
-class WeChatWebhookHandler(BaseHTTPRequestHandler):
+class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        if self.path != '/wechat/webhook':
-            self.send_response(404)
-            self.end_headers()
-            return
-        length = int(self.headers.get('Content-Length', '0'))
-        raw = self.rfile.read(length) if length else b'{}'
-        try:
-            data = json.loads(raw.decode('utf-8'))
-        except json.JSONDecodeError:
-            data = {}
-        body = {
-            'success': True,
-            'message_id': f"wx_{data.get('task_id', 'unknown')}",
-            'received': True,
-        }
-        encoded = json.dumps(body).encode('utf-8')
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Content-Length', str(len(encoded)))
-        self.end_headers()
-        self.wfile.write(encoded)
+        length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(length)
 
-    def log_message(self, format, *args):
-        print(format % args)
+        try:
+            data = json.loads(body.decode('utf-8'))
+        except Exception:
+            data = {}
+
+        response = {
+            "success": True,
+            "message_id": f"wx_{data.get('task_id','unknown')}",
+            "received": True,
+        }
+
+        resp_bytes = json.dumps(response).encode('utf-8')
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(resp_bytes)))
+        self.end_headers()
+        self.wfile.write(resp_bytes)
+
+
+def run():
+    server = HTTPServer(('127.0.0.1', 8899), Handler)
+    print('Webhook server running at http://127.0.0.1:8899', flush=True)
+    server.serve_forever()
 
 
 if __name__ == '__main__':
-    HTTPServer(('127.0.0.1', 8899), WeChatWebhookHandler).serve_forever()
+    run()
