@@ -286,7 +286,7 @@ class TestWeChatNotifyIntegration:
 
     def test_real_missing_webhook_returns_explicit_error(self):
         with patch.dict(os.environ,
-                        {_ENV_ENABLED: "true", _ENV_APP_ID: "", _ENV_APP_SECRET: ""},
+                        {_ENV_ENABLED: "true"},
                         clear=True):
             channel = WeChatNotifyChannel(mode="real")
             result = channel.send_reminder("task_wi_004", {"title": "x"})
@@ -305,8 +305,6 @@ class TestWeChatNotifyIntegration:
 
         with patch.dict(os.environ,
                         {_ENV_ENABLED: "true",
-                         _ENV_APP_ID: "wx_id",
-                         _ENV_APP_SECRET: "secret",
                          _ENV_WEBHOOK_URL: "https://wechat.example/webhook"},
                         clear=True):
             with patch("urllib.request.urlopen", lambda req, timeout: FakeResponse()):
