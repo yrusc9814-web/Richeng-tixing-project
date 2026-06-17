@@ -314,6 +314,8 @@ class TestWeChatNotifyIntegration:
         assert result.success is True
         assert result.status == "sent"
         assert result.message_id == "wi_005"
+        assert result.provider_response is not None
+        assert result.provider_response.get("errcode") == 0
         assert result.error_message is None
 
 

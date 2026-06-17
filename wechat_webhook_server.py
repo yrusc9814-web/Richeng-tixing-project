@@ -14,7 +14,7 @@ class Handler(BaseHTTPRequestHandler):
 
         response = {
             "success": True,
-            "message_id": f"wx_{data.get('task_id','unknown')}",
+            "message_id": f"wx_{data.get('task_id', 'unknown')}",
             "received": True,
         }
 
@@ -29,7 +29,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def run():
     server = HTTPServer(('127.0.0.1', 8899), Handler)
-    print('Webhook server running at http://127.0.0.1:8899', flush=True)
+    print('Webhook server running at http://127.0.0.1:8899')
     server.serve_forever()
 
 
