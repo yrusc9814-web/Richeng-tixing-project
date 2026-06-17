@@ -40,14 +40,15 @@ from local_api.adapters.apple_adapter import AppleSyncAdapter, MockAppleAdapter
 from local_api.config import ALLOWED_SYNC_TARGETS
 from local_api.database import get_db, init_db, reset_db
 from local_api.notify.wechat_channel import (
-    WeChatNotifyChannel,
     _ENV_APP_ID,
     _ENV_APP_SECRET,
     _ENV_ENABLED,
     _ENV_WEBHOOK_URL,
+    WeChatNotifyChannel,
 )
-from local_api.scheduler.sync_scheduler import SyncScheduler
+
 from local_api.services.sync_service import SyncService
+from local_api.scheduler.sync_scheduler import SyncScheduler
 from local_api.services.sync_state_service import (
     create_sync_state,
     transition_sync_state,
