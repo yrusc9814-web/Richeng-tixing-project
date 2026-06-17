@@ -34,6 +34,9 @@ class NotifyResult:
     status: str = "failed"
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    message_id: Optional[str] = None
+    request_id: Optional[str] = None
+    provider_response: dict = field(default_factory=dict)
 
 
 class NotifyChannel(ABC):

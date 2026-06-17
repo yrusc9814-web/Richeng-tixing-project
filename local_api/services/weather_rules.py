@@ -1,4 +1,4 @@
-"""Phase60 — deterministic local weather cache and evaluator."""
+"""Phase60 — real weather cache and evaluator."""
 
 import json
 import secrets
@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from ..adapters.weather_adapter import RealWeatherProvider, WeatherProviderError
 from ..database import get_db
 from .reminder_policy import _insert_log
 
@@ -39,6 +40,24 @@ def store_forecast(location: str, forecast_time: str, *, temperature: Optional[f
     return dict(conn.execute("SELECT * FROM weather_cache WHERE id = ?", (weather_id,)).fetchone())
 
 
+def fetch_and_store_real_forecast(location: str, forecast_time: Optional[str] = None) -> dict:
+    """Fetch real weather data over HTTP and persist it to weather_cache."""
+    result = RealWeatherProvider().fetch(location, forecast_time)
+    raw_payload = dict(result.raw_payload)
+    raw_payload["provider"] = result.provider
+    raw_payload["request_id"] = result.request_id
+    return store_forecast(
+        result.location,
+        result.forecast_time,
+        temperature=result.temperature,
+        condition=result.condition,
+        rain_probability=result.rain_probability,
+        wind_level=result.wind_level,
+        aqi=result.aqi,
+        raw_payload=raw_payload,
+    )
+
+
 def _latest_forecast(location: str) -> Optional[dict]:
     row = get_db().execute(
         """SELECT * FROM weather_cache
@@ -57,24 +76,40 @@ def is_abnormal_weather(forecast: dict) -> bool:
     return any(word in condition for word in ("storm", "暴雨", "雨", "snow", "台风")) or rain >= 0.6 or aqi >= 150 or wind in {"7", "8", "9", "10", "大风"}
 
 
-def evaluate_weather_for_task(task: dict) -> dict:
+def evaluate_weather_for_task(task: dict, *, fetch_real: bool = True) -> dict:
     if not task.get("weather_sensitive"):
-        return {"triggered": False, "reason": "not_weather_sensitive"}
+        return {"triggered": False, "reason": "not_weather_sensitive", "mock": False}
     location = task.get("location")
     if not location:
-        return {"triggered": False, "reason": "no_location"}
+        return {"triggered": False, "reason": "no_location", "mock": False}
+
     forecast = _latest_forecast(location)
+    fetch_evidence = None
+    if fetch_real and not forecast:
+        try:
+            forecast = fetch_and_store_real_forecast(location, task.get("start_time") or task.get("due_time"))
+            raw_payload = json.loads(forecast.get("raw_payload") or "{}")
+            fetch_evidence = {
+                "provider": raw_payload.get("provider"),
+                "request_id": raw_payload.get("request_id"),
+                "cache_id": forecast.get("id"),
+            }
+        except WeatherProviderError as exc:
+            if not forecast:
+                return {"triggered": False, "reason": "weather_provider_error", "error": str(exc), "mock": False}
+            fetch_evidence = {"provider_error": str(exc), "cache_id": forecast.get("id")}
+
     if not forecast:
-        return {"triggered": False, "reason": "no_forecast"}
+        return {"triggered": False, "reason": "no_forecast", "mock": False}
     if not is_abnormal_weather(forecast):
-        return {"triggered": False, "reason": "normal_weather", "forecast": forecast}
+        return {"triggered": False, "reason": "normal_weather", "forecast": forecast, "fetch": fetch_evidence, "mock": False}
     payload = {"task_id": task["task_id"], "channel": "wechat", "trigger": "weather", "forecast_id": forecast["id"]}
     log = _insert_log(task["task_id"], "wechat", "weather", task.get("start_time") or task.get("due_time"), payload)
-    return {"triggered": True, "forecast": forecast, "notification": log}
+    return {"triggered": True, "forecast": forecast, "notification": log, "fetch": fetch_evidence, "mock": False}
 
 
 def weather_overview() -> dict:
     conn = get_db()
     row = conn.execute("SELECT COUNT(*) AS cnt FROM weather_cache WHERE expires_at >= ?", (_iso_now(),)).fetchone()
-    latest = conn.execute("SELECT location, condition, rain_probability, aqi FROM weather_cache ORDER BY fetched_at DESC LIMIT 1").fetchone()
-    return {"active_forecasts": row["cnt"], "latest": dict(latest) if latest else None}
+    latest = conn.execute("SELECT location, condition, rain_probability, aqi, raw_payload FROM weather_cache ORDER BY fetched_at DESC LIMIT 1").fetchone()
+    return {"active_forecasts": row["cnt"], "latest": dict(latest) if latest else None, "mock": False}

@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..database import get_db
-from ..services.reminder_policy import generate_reminders_for_task, reminder_summary
+from ..services.reminder_policy import generate_reminders_for_task, reminder_summary, send_wechat_notification_for_task
 from ..services.weather_rules import evaluate_weather_for_task, store_forecast, weather_overview
 from ..services.apple_import_service import import_apple_snapshots
 
@@ -41,6 +41,11 @@ def _task_or_404(task_id: str) -> dict:
 @router.post("/reminders/tasks/{task_id}/generate")
 def generate_task_reminders(task_id: str):
     return {"actions": generate_reminders_for_task(_task_or_404(task_id))}
+
+
+@router.post("/wechat/tasks/{task_id}/send")
+def send_task_wechat(task_id: str):
+    return send_wechat_notification_for_task(_task_or_404(task_id))
 
 
 @router.post("/weather/forecasts")

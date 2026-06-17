@@ -4,11 +4,13 @@ import hashlib
 import json
 import secrets
 import time
+from dataclasses import asdict
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from ..database import get_db
+from ..notify.wechat_channel import WeChatNotifyChannel
 
 
 def _iso_now() -> str:
@@ -72,6 +74,42 @@ def record_notification_failure(task_id: str, channel: str, trigger_type: str,
                                 scheduled_for: Optional[str], payload: dict,
                                 error_message: str) -> dict:
     return _insert_log(task_id, channel, trigger_type, scheduled_for, payload, "failed", error_message)
+
+
+def _update_notification_delivery(log_id: str, status: str, result: dict) -> dict:
+    conn = get_db()
+    now = _iso_now()
+    error_message = result.get("error_message")
+    payload = json.dumps({
+        "request_id": result.get("request_id"),
+        "message_id": result.get("message_id"),
+        "provider_response": result.get("provider_response") or {},
+        "error_code": result.get("error_code"),
+    }, ensure_ascii=False, sort_keys=True)
+    conn.execute(
+        """UPDATE notification_log
+           SET status = ?, sent_at = ?, error_message = ?, updated_at = ?, payload_hash = ?
+           WHERE id = ?""",
+        (status, now if status == "sent" else None, error_message, now, _payload_hash({"delivery": payload}), log_id),
+    )
+    conn.commit()
+    return dict(conn.execute("SELECT * FROM notification_log WHERE id = ?", (log_id,)).fetchone())
+
+
+def send_wechat_notification_for_task(task: dict, *, trigger_type: str = "manual") -> dict:
+    """Generate and send a real WeChat notification, then persist delivery state."""
+    payload = {
+        "task_id": task["task_id"],
+        "channel": "wechat",
+        "trigger": trigger_type,
+        "policy": task.get("notify_policy"),
+        "scheduled_for": task.get("start_time") or task.get("due_time"),
+    }
+    log = _insert_log(task["task_id"], "wechat", trigger_type, payload["scheduled_for"], payload)
+    result = asdict(WeChatNotifyChannel(mode="real").send_reminder(task["task_id"], task))
+    delivery_status = "sent" if result.get("success") else "failed"
+    updated_log = _update_notification_delivery(log["id"], delivery_status, result)
+    return {"result": result, "notification": updated_log, "mock": False}
 
 
 def reminder_summary() -> dict:

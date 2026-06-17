@@ -44,6 +44,7 @@ from local_api.notify.wechat_channel import (
     _ENV_APP_ID,
     _ENV_APP_SECRET,
     _ENV_ENABLED,
+    _ENV_WEBHOOK_URL,
 )
 from local_api.scheduler.sync_scheduler import SyncScheduler
 from local_api.services.sync_service import SyncService
@@ -283,26 +284,38 @@ class TestWeChatNotifyIntegration:
         assert result.error_code == "platform_not_configured"
         assert result.error_message is not None
 
-    def test_real_missing_credentials_returns_explicit_error(self):
+    def test_real_missing_webhook_returns_explicit_error(self):
         with patch.dict(os.environ,
                         {_ENV_ENABLED: "true", _ENV_APP_ID: "", _ENV_APP_SECRET: ""},
                         clear=True):
             channel = WeChatNotifyChannel(mode="real")
             result = channel.send_reminder("task_wi_004", {"title": "x"})
         assert result.success is False
-        assert result.error_code == "missing_credentials"
+        assert result.error_code == "missing_webhook_url"
 
-    def test_real_not_implemented_with_full_config(self):
+    def test_real_webhook_with_full_config(self):
+        class FakeResponse:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return False
+            def read(self):
+                return b'{"errcode":0,"errmsg":"ok","msgid":"wi_005"}'
+
         with patch.dict(os.environ,
                         {_ENV_ENABLED: "true",
                          _ENV_APP_ID: "wx_id",
-                         _ENV_APP_SECRET: "secret"},
+                         _ENV_APP_SECRET: "secret",
+                         _ENV_WEBHOOK_URL: "https://wechat.example/webhook"},
                         clear=True):
-            channel = WeChatNotifyChannel(mode="real")
-            result = channel.send_reminder("task_wi_005", {"title": "x"})
-        assert result.success is False
-        assert result.error_code == "not_implemented"
-        assert result.error_message is not None
+            with patch("urllib.request.urlopen", lambda req, timeout: FakeResponse()):
+                channel = WeChatNotifyChannel(mode="real")
+                result = channel.send_reminder("task_wi_005", {"title": "x"})
+        assert result.success is True
+        assert result.status == "sent"
+        assert result.message_id == "wi_005"
+        assert result.error_message is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════

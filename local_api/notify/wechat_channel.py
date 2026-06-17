@@ -1,67 +1,37 @@
-"""Phase 15 — WeChat reminder notification channel (safety layer).
-
-WeChat is used as a notification/reminder exit point for the personal
-schedule reminder hub system. This module provides a safety layer with
-three operating modes, explicit error codes, and no real push capability
-until a later phase.
-
-Safety properties:
-  - dry_run mode: validates nothing, returns skipped (no external calls)
-  - test_mode: simulated notification with deterministic result
-  - real mode: validates config/credentials, returns not_implemented
-  - All failure paths return structured NotifyResult with error_code/error_message
-"""
+"""WeChat reminder notification channel with real webhook delivery support."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import urllib.error
+import urllib.request
 from typing import Optional
 
 from .base import NotifyChannel, NotifyResult
 
-
-# ── Environment variable names ─────────────────────────────────────────────
-
 _ENV_ENABLED = "WECHAT_REMINDER_ENABLED"
 _ENV_APP_ID = "WECHAT_APP_ID"
 _ENV_APP_SECRET = "WECHAT_APP_SECRET"
+_ENV_WEBHOOK_URL = "WECHAT_REMINDER_WEBHOOK_URL"
+_ENV_LEGACY_WEBHOOK_URL = "WECHAT_WEBHOOK_URL"
 
 
 class WeChatNotifyChannel(NotifyChannel):
-    """WeChat reminder notification channel with safety layer.
+    """WeChat reminder notification channel.
 
-    Designed as a notification/reminder exit point, NOT a sync adapter.
-    Provides three operating modes:
-
-    dry_run (mode='dry_run')
-        Returns success with status='skipped'. No config/credential checks.
-        Safe for cron/scheduler validation without side effects.
-
-    test_mode (mode='test_mode')
-        Simulates a successful notification with status='simulated'.
-        Returns a deterministic result for testing output structure stability.
-        No real WeChat message is sent.
-
-    real (mode='real')
-        Validates platform configuration and credentials, then either
-        returns not_implemented (real push deferred) or a config error.
-
-    Args:
-        mode: Operating mode — 'dry_run', 'test_mode', or 'real'.
-
-    Raises:
-        ValueError: If mode is not a valid operating mode.
+    Real mode sends an HTTP POST to a configured WeChat-compatible webhook.
+    The webhook can be Enterprise WeChat robot, Server酱, or a user-owned
+    gateway that returns JSON or text. Dry-run and test_mode remain explicit
+    non-real modes for tests only.
     """
-
-    # ── Constants ──────────────────────────────────────────────────────────
 
     MODE_DRY_RUN = "dry_run"
     MODE_TEST = "test_mode"
     MODE_REAL = "real"
 
     _VALID_MODES = frozenset({MODE_DRY_RUN, MODE_TEST, MODE_REAL})
-
-    # ── Construction ───────────────────────────────────────────────────────
 
     def __init__(self, mode: str = MODE_DRY_RUN):
         if mode not in self._VALID_MODES:
@@ -71,51 +41,18 @@ class WeChatNotifyChannel(NotifyChannel):
             )
         self._mode = mode
 
-    # ── NotifyChannel interface ────────────────────────────────────────────
-
     @property
     def channel_name(self) -> str:
         return "wechat"
 
     def send_reminder(self, task_id: str, task_data: dict) -> NotifyResult:
-        """Send a WeChat reminder notification for the given task.
-
-        Mode-dependent behavior:
-        - dry_run: Returns skipped, no checks or external calls.
-        - test_mode: Returns simulated success with deterministic result.
-        - real: Validates config/credentials, then returns not_implemented.
-
-        Args:
-            task_id: Identifier of the task to remind about.
-            task_data: Task details as a dict (title, priority, etc.).
-
-        Returns:
-            NotifyResult — see class docstring for per-mode behavior.
-        """
-        # 1. Dry-run → skip immediately (no config/credential checks)
         if self._mode == self.MODE_DRY_RUN:
-            return NotifyResult(
-                success=True,
-                mode=self._mode,
-                channel="wechat",
-                task_id=task_id,
-                status="skipped",
-            )
+            return NotifyResult(success=True, mode=self._mode, channel="wechat", task_id=task_id, status="skipped")
 
-        # 2. Test mode → simulated notification (no config/credential checks)
         if self._mode == self.MODE_TEST:
-            return NotifyResult(
-                success=True,
-                mode=self._mode,
-                channel="wechat",
-                task_id=task_id,
-                status="simulated",
-            )
+            return NotifyResult(success=True, mode=self._mode, channel="wechat", task_id=task_id, status="simulated")
 
-        # 3. Real mode → validate configuration
         assert self._mode == self.MODE_REAL
-
-        # 3a. Platform not configured
         if not self._is_platform_configured():
             return NotifyResult(
                 success=False,
@@ -124,61 +61,126 @@ class WeChatNotifyChannel(NotifyChannel):
                 task_id=task_id,
                 status="config_error",
                 error_code="platform_not_configured",
-                error_message=(
-                    "WeChat notification channel is not configured. "
-                    f"Set {_ENV_ENABLED}=true to enable."
-                ),
+                error_message=f"Set {_ENV_ENABLED}=true and {_ENV_WEBHOOK_URL} for real WeChat delivery.",
             )
 
-        # 3b. Credentials missing
-        if not self._has_credentials():
+        webhook_url = self._webhook_url()
+        if not webhook_url:
             return NotifyResult(
                 success=False,
                 mode=self._mode,
                 channel="wechat",
                 task_id=task_id,
                 status="config_error",
-                error_code="missing_credentials",
-                error_message=(
-                    "WeChat app credentials not found. "
-                    f"Set {_ENV_APP_ID} and {_ENV_APP_SECRET}."
-                ),
+                error_code="missing_webhook_url",
+                error_message=f"Set {_ENV_WEBHOOK_URL} or {_ENV_LEGACY_WEBHOOK_URL}.",
             )
 
-        # 3c. Real push: not implemented (deferred to later phase)
-        return NotifyResult(
-            success=False,
-            mode=self._mode,
-            channel="wechat",
-            task_id=task_id,
-            status="not_implemented",
-            error_code="not_implemented",
-            error_message=(
-                "Real WeChat push not yet implemented. "
-                "Use mode='dry_run' or mode='test_mode' for safe validation."
-            ),
-        )
-
-    # ── Internal helpers ───────────────────────────────────────────────────
+        return self._send_webhook(webhook_url, task_id, task_data)
 
     @staticmethod
     def _is_platform_configured() -> bool:
-        """Return True if the WeChat notification platform is configured.
-
-        Checks for the WECHAT_REMINDER_ENABLED environment variable set to
-        a truthy value ('true', '1', 'yes').
-        """
-        return os.environ.get(_ENV_ENABLED, "").strip().lower() in {
-            "true", "1", "yes",
-        }
+        return os.environ.get(_ENV_ENABLED, "").strip().lower() in {"true", "1", "yes"}
 
     @staticmethod
     def _has_credentials() -> bool:
-        """Return True if WeChat app credentials are present.
+        return bool(WeChatNotifyChannel._webhook_url())
 
-        Checks for non-empty WECHAT_APP_ID and WECHAT_APP_SECRET
-        environment variables.
-        """
-        app_id = os.environ.get(_ENV_APP_ID, "").strip()
-        app_secret = os.environ.get(_ENV_APP_SECRET, "").strip()
-        return bool(app_id) and bool(app_secret)
+    @staticmethod
+    def _webhook_url() -> str:
+        return (os.environ.get(_ENV_WEBHOOK_URL) or os.environ.get(_ENV_LEGACY_WEBHOOK_URL) or "").strip()
+
+    def _send_webhook(self, webhook_url: str, task_id: str, task_data: dict) -> NotifyResult:
+        payload = self._build_payload(task_id, task_data)
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request_id = hashlib.sha256(body).hexdigest()[:24]
+        req = urllib.request.Request(
+            webhook_url,
+            data=body,
+            headers={"Content-Type": "application/json", "User-Agent": "LifeSync/1.0"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                response_body = response.read().decode("utf-8", errors="replace")
+                provider_response = self._parse_response(response_body)
+                success = 200 <= response.status < 300 and self._provider_success(provider_response)
+                message_id = self._message_id(provider_response, request_id)
+                return NotifyResult(
+                    success=success,
+                    mode=self._mode,
+                    channel="wechat",
+                    task_id=task_id,
+                    status="sent" if success else "failed",
+                    error_code=None if success else "provider_rejected",
+                    error_message=None if success else response_body[:500],
+                    message_id=message_id,
+                    request_id=request_id,
+                    provider_response=provider_response,
+                )
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            return NotifyResult(
+                success=False,
+                mode=self._mode,
+                channel="wechat",
+                task_id=task_id,
+                status="failed",
+                error_code=f"http_{exc.code}",
+                error_message=error_body[:500] or str(exc),
+                request_id=request_id,
+                provider_response={"http_status": exc.code, "body": error_body[:500]},
+            )
+        except Exception as exc:
+            return NotifyResult(
+                success=False,
+                mode=self._mode,
+                channel="wechat",
+                task_id=task_id,
+                status="failed",
+                error_code="send_error",
+                error_message=str(exc),
+                request_id=request_id,
+            )
+
+    @staticmethod
+    def _build_payload(task_id: str, task_data: dict) -> dict:
+        title = task_data.get("title") or task_id
+        start = task_data.get("start_time") or task_data.get("due_time") or "未设置时间"
+        location = task_data.get("location") or "未设置地点"
+        content = f"LifeSync 日程提醒\n标题：{title}\n时间：{start}\n地点：{location}\n任务ID：{task_id}"
+        return {
+            "msgtype": "text",
+            "text": {"content": content},
+            "task_id": task_id,
+            "title": title,
+            "start_time": start,
+            "location": location,
+        }
+
+    @staticmethod
+    def _parse_response(response_body: str) -> dict:
+        try:
+            parsed = json.loads(response_body) if response_body else {}
+            return parsed if isinstance(parsed, dict) else {"body": parsed}
+        except json.JSONDecodeError:
+            return {"body": response_body}
+
+    @staticmethod
+    def _provider_success(provider_response: dict) -> bool:
+        if not provider_response:
+            return True
+        if "errcode" in provider_response:
+            return provider_response.get("errcode") == 0
+        if "code" in provider_response and str(provider_response.get("code")) not in {"0", "200"}:
+            return False
+        if "success" in provider_response:
+            return bool(provider_response.get("success"))
+        return True
+
+    @staticmethod
+    def _message_id(provider_response: dict, fallback: str) -> str:
+        for key in ("message_id", "msgid", "id", "request_id"):
+            if provider_response.get(key):
+                return str(provider_response[key])
+        return fallback

@@ -27,6 +27,7 @@ from local_api.notify.wechat_channel import (
     _ENV_APP_ID,
     _ENV_APP_SECRET,
     _ENV_ENABLED,
+    _ENV_WEBHOOK_URL,
 )
 
 
@@ -193,74 +194,38 @@ class TestWeChatNotifyChannelNotConfigured:
         assert result.error_code == "platform_not_configured"
 
 
-class TestWeChatNotifyChannelMissingCredentials:
-    """WeChatNotifyChannel: real mode with enabled but missing credentials."""
+class TestWeChatNotifyChannelMissingWebhook:
+    """WeChatNotifyChannel: real mode with enabled but missing webhook URL."""
 
-    def test_missing_both_credentials(self):
-        """Enabled + missing both app_id and app_secret must return missing_credentials."""
-        with patch.dict(
-            os.environ,
-            {_ENV_ENABLED: "true", _ENV_APP_ID: "", _ENV_APP_SECRET: ""},
-            clear=True,
-        ):
+    def test_missing_webhook_url(self):
+        with patch.dict(os.environ, {_ENV_ENABLED: "true"}, clear=True):
             channel = WeChatNotifyChannel(mode="real")
             result = channel.send_reminder("task_100", _SAMPLE_TASK)
 
         assert result.success is False
         assert result.status == "config_error"
-        assert result.error_code == "missing_credentials"
+        assert result.error_code == "missing_webhook_url"
         assert result.error_message is not None
-        assert "WECHAT_APP_ID" in result.error_message
+        assert "WECHAT_REMINDER_WEBHOOK_URL" in result.error_message
 
-    def test_missing_app_id(self):
-        """Enabled + missing app_id must return missing_credentials."""
+    def test_app_credentials_without_webhook_are_not_enough(self):
         with patch.dict(
             os.environ,
-            {
-                _ENV_ENABLED: "true",
-                _ENV_APP_ID: "",
-                _ENV_APP_SECRET: "valid_secret",
-            },
+            {_ENV_ENABLED: "true", _ENV_APP_ID: "wx_appid_1234", _ENV_APP_SECRET: "valid_secret"},
             clear=True,
         ):
             channel = WeChatNotifyChannel(mode="real")
             result = channel.send_reminder("task_100", _SAMPLE_TASK)
 
         assert result.success is False
-        assert result.error_code == "missing_credentials"
-
-    def test_missing_app_secret(self):
-        """Enabled + missing app_secret must return missing_credentials."""
-        with patch.dict(
-            os.environ,
-            {
-                _ENV_ENABLED: "true",
-                _ENV_APP_ID: "wx_appid_1234",
-                _ENV_APP_SECRET: "",
-            },
-            clear=True,
-        ):
-            channel = WeChatNotifyChannel(mode="real")
-            result = channel.send_reminder("task_100", _SAMPLE_TASK)
-
-        assert result.success is False
-        assert result.error_code == "missing_credentials"
+        assert result.error_code == "missing_webhook_url"
 
 
-class TestWeChatNotifyChannelRealNotImplemented:
-    """WeChatNotifyChannel: real mode with valid config but push deferred."""
+class TestWeChatNotifyChannelRealWebhook:
+    """WeChatNotifyChannel: real mode uses a configured webhook."""
 
-    def test_real_push_returns_not_implemented(self):
-        """Fully configured + real mode must return not_implemented."""
-        with patch.dict(
-            os.environ,
-            {
-                _ENV_ENABLED: "true",
-                _ENV_APP_ID: "wx_appid_1234",
-                _ENV_APP_SECRET: "valid_secret_value",
-            },
-            clear=True,
-        ):
+    def test_real_push_requires_webhook_url(self):
+        with patch.dict(os.environ, {_ENV_ENABLED: "true"}, clear=True):
             channel = WeChatNotifyChannel(mode="real")
             result = channel.send_reminder("task_100", _SAMPLE_TASK)
 
@@ -268,27 +233,45 @@ class TestWeChatNotifyChannelRealNotImplemented:
         assert result.mode == "real"
         assert result.channel == "wechat"
         assert result.task_id == "task_100"
-        assert result.status == "not_implemented"
-        assert result.error_code == "not_implemented"
-        assert result.error_message is not None
-        assert "dry_run" in result.error_message
+        assert result.status == "config_error"
+        assert result.error_code == "missing_webhook_url"
 
-    def test_real_push_with_all_env_variants(self):
-        """Test '1', 'yes', 'true' all count as enabled."""
-        for truthy in ("true", "1", "yes", "TRUE", "True"):
-            with patch.dict(
-                os.environ,
-                {
-                    _ENV_ENABLED: truthy,
-                    _ENV_APP_ID: "wx_appid_1234",
-                    _ENV_APP_SECRET: "valid_secret_value",
-                },
-                clear=True,
-            ):
+    def test_real_push_posts_to_webhook(self):
+        class FakeResponse:
+            status = 200
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, tb):
+                return False
+            def read(self):
+                return b'{"errcode":0,"errmsg":"ok","msgid":"msg_123"}'
+
+        captured = {}
+        def fake_urlopen(req, timeout):
+            captured["url"] = req.full_url
+            captured["body"] = req.data.decode("utf-8")
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with patch.dict(os.environ, {_ENV_ENABLED: "true", _ENV_WEBHOOK_URL: "https://wechat.example/webhook"}, clear=True):
+            with patch("urllib.request.urlopen", fake_urlopen):
                 channel = WeChatNotifyChannel(mode="real")
                 result = channel.send_reminder("task_100", _SAMPLE_TASK)
 
-            assert result.error_code == "not_implemented", (
+        assert result.success is True
+        assert result.status == "sent"
+        assert result.message_id == "msg_123"
+        assert result.request_id
+        assert captured["url"] == "https://wechat.example/webhook"
+        assert "Team standup reminder" in captured["body"]
+
+    def test_real_push_with_all_env_variants(self):
+        for truthy in ("true", "1", "yes", "TRUE", "True"):
+            with patch.dict(os.environ, {_ENV_ENABLED: truthy}, clear=True):
+                channel = WeChatNotifyChannel(mode="real")
+                result = channel.send_reminder("task_100", _SAMPLE_TASK)
+
+            assert result.error_code == "missing_webhook_url", (
                 f"Failed for enabled={truthy!r}"
             )
 
@@ -303,7 +286,7 @@ class TestNotifyResultOutputStructure:
 
     _REQUIRED_FIELDS = {
         "success", "mode", "channel", "task_id",
-        "status", "error_code", "error_message",
+        "status", "error_code", "error_message", "message_id", "request_id", "provider_response",
     }
 
     def _assert_structure(self, result: NotifyResult):
@@ -315,6 +298,9 @@ class TestNotifyResultOutputStructure:
             "status": result.status,
             "error_code": result.error_code,
             "error_message": result.error_message,
+            "message_id": result.message_id,
+            "request_id": result.request_id,
+            "provider_response": result.provider_response,
         }
         assert result_dict.keys() == self._REQUIRED_FIELDS, (
             f"Expected fields {self._REQUIRED_FIELDS}, got {set(result_dict.keys())}"
@@ -342,14 +328,10 @@ class TestNotifyResultOutputStructure:
             channel = WeChatNotifyChannel(mode="real")
             self._assert_structure(channel.send_reminder("task_100", _SAMPLE_TASK))
 
-    def test_real_not_implemented_output_has_all_fields(self):
+    def test_real_missing_webhook_output_has_all_fields(self):
         with patch.dict(
             os.environ,
-            {
-                _ENV_ENABLED: "true",
-                _ENV_APP_ID: "wx_appid_1234",
-                _ENV_APP_SECRET: "valid_secret_value",
-            },
+            {_ENV_ENABLED: "true"},
             clear=True,
         ):
             channel = WeChatNotifyChannel(mode="real")
