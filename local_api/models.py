@@ -221,6 +221,7 @@ class TaskResponse(BaseModel):
     sync_enabled: bool = False
     sync_targets: list = ["apple_calendar"]
     last_sync_status: Optional[str] = None
+    last_synced_at: Optional[str] = None
     source: Optional[str] = None
     apple_snapshot: Optional[dict] = None
     apple_external_id: Optional[str] = None

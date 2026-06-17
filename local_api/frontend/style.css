@@ -688,6 +688,18 @@ html, body {
   white-space: nowrap;
 }
 
+.calendar-month-label,
+.info-status-line {
+  font-size: 11px;
+  color: var(--color-text-light);
+  font-weight: 500;
+}
+
+.info-status-line {
+  display: block;
+  margin-top: 2px;
+}
+
 .sync-status-summary {
   display: flex;
   flex-direction: column;

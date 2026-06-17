@@ -609,7 +609,7 @@ class TestAPIResponseStructure:
             "need_weather_check", "schedule_type", "notify_policy",
             "weather_sensitive", "reminder_profile", "reminder_channels",
             "created_channel", "sync_enabled", "sync_targets",
-            "last_sync_status", "created_at", "updated_at",
+            "last_sync_status", "last_synced_at", "created_at", "updated_at",
         }
         assert expected.issubset(data.keys())
 
@@ -681,6 +681,16 @@ class TestFrontendCalendarMarkers:
     def test_empty_state_hint_for_selected_date(self):
         source = self.FRONTEND_PATH.read_text(encoding="utf-8")
         assert "暂无日程" in source
+
+    def test_prd_ui_contract_markers_exist(self):
+        app_source = self.FRONTEND_PATH.read_text(encoding="utf-8")
+        html_source = (Path(__file__).resolve().parent.parent / "frontend" / "index.html").read_text(encoding="utf-8")
+        assert "class=\"task-select\"" in app_source
+        assert "id=\"select-all-tasks\"" in html_source
+        assert "#edit-sync-enabled').checked = true" in app_source
+        assert "calendar-mini-month" in html_source
+        assert "最后同步时间" in app_source
+        assert "info-status-line" in app_source
 
 
 class TestGetTask:

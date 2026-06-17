@@ -344,6 +344,7 @@ function renderTable() {
 
     return `
       <tr class="${task.task_id === selectedTaskId ? 'selected' : ''}" onclick="selectTaskRow('${task.task_id}')">
+        <td><input type="checkbox" class="task-select" aria-label="选择日程 ${escapeHtml(task.title)}" onclick="event.stopPropagation()"></td>
         <td class="task-title" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</td>
         <td class="time-cell">${formatDatetime(task.start_time)}</td>
         <td class="time-cell">${formatDatetime(task.due_time)}</td>
@@ -395,12 +396,16 @@ function renderTodayList() {
     container.innerHTML = '<div style="padding:6px 0;font-size:12px;color:var(--color-text-light)">今日暂无日程</div>';
     return;
   }
-  container.innerHTML = todayTasks.slice(0, 5).map(t => `
-    <div class="info-today-item">
-      <span class="info-today-time">${formatDatetime(t.start_time || t.due_time)}</span>
-      <span class="info-today-title" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</span>
-    </div>
-  `).join('');
+  container.innerHTML = todayTasks.slice(0, 5).map(t => {
+    const syncStatus = t.last_sync_status || 'not_synced';
+    return `
+      <div class="info-today-item">
+        <span class="info-today-time">${formatDatetime(t.start_time || t.due_time)}</span>
+        <span class="info-today-title" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</span>
+        <span class="info-status-line">${STATUS_TASK_LABELS[t.status] || t.status} · ${STATUS_SYNC_LABELS[syncStatus] || syncStatus}</span>
+      </div>
+    `;
+  }).join('');
 }
 
 function renderUpcomingList() {
@@ -412,12 +417,16 @@ function renderUpcomingList() {
     container.innerHTML = '<div style="padding:6px 0;font-size:12px;color:var(--color-text-light)">暂无即将开始的日程</div>';
     return;
   }
-  container.innerHTML = upcomingTasks.slice(0, 5).map(t => `
-    <div class="info-upcoming-item">
-      <span class="info-today-time">${formatDatetime(t.start_time || t.due_time)}</span>
-      <span class="info-today-title" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</span>
-    </div>
-  `).join('');
+  container.innerHTML = upcomingTasks.slice(0, 5).map(t => {
+    const syncStatus = t.last_sync_status || 'not_synced';
+    return `
+      <div class="info-upcoming-item">
+        <span class="info-today-time">${formatDatetime(t.start_time || t.due_time)}</span>
+        <span class="info-today-title" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</span>
+        <span class="info-status-line">${STATUS_SYNC_LABELS[syncStatus] || syncStatus}</span>
+      </div>
+    `;
+  }).join('');
 }
 
 function renderSyncSummary() {
@@ -427,8 +436,14 @@ function renderSyncSummary() {
   const stale = active.filter(t => t.last_sync_status === 'stale').length;
   const failed = active.filter(t => t.last_sync_status === 'failed' || t.last_sync_status === 'failed_permanent').length;
   const notSynced = active.filter(t => !t.last_sync_status || t.last_sync_status === 'not_synced').length;
+  const lastSyncedAt = active
+    .map(t => t.last_synced_at)
+    .filter(Boolean)
+    .sort()
+    .pop();
 
   $('#sync-summary').innerHTML = `
+    <div class="sync-summary-item"><span>最后同步时间</span><span class="sync-count">${lastSyncedAt ? formatDatetime(lastSyncedAt) : '-'}</span></div>
     <div class="sync-summary-item"><span>已同步</span><span class="sync-count" style="color:var(--color-chip-synced)">${synced}</span></div>
     <div class="sync-summary-item"><span>待同步</span><span class="sync-count" style="color:var(--color-chip-pending)">${pending}</span></div>
     <div class="sync-summary-item"><span>已过期</span><span class="sync-count" style="color:var(--color-chip-stale)">${stale}</span></div>
@@ -489,6 +504,8 @@ function renderCalendarMini() {
   });
 
   const container = $('#calendar-mini-body');
+  const monthLabel = $('#calendar-mini-month');
+  if (monthLabel) monthLabel.textContent = `${year}年${month + 1}月`;
 
   if (!currentTasks.length) {
     container.innerHTML = '<div class="calendar-mini-placeholder">暂无日程数据</div>';
@@ -743,7 +760,7 @@ function showCreateModal() {
   $('#edit-notify-policy').value = 'calendar_only';
   $('#edit-weather-sensitive').checked = false;
   $('#edit-reminder-profile').value = '';
-  $('#edit-sync-enabled').checked = false;
+  $('#edit-sync-enabled').checked = true;
   $('#edit-sync-targets').value = 'apple_calendar';
   $('#modal-title').textContent = '创建日程';
   showModal(true);

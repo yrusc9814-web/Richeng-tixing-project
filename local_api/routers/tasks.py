@@ -99,8 +99,8 @@ def _enrich_tasks_with_sync_info(tasks: list[TaskResponse]) -> list[TaskResponse
         task_ids,
     ).fetchall()
 
-    # Build map: task_id -> {sync_target -> sync_status}
-    sync_map: dict[str, dict[str, str]] = {}
+    # Build map: task_id -> {sync_target -> sync metadata}
+    sync_map: dict[str, dict[str, dict[str, Optional[str]]]] = {}
     for sr in sync_rows:
         tid = sr["task_id"]
         if tid not in sync_map:
@@ -108,15 +108,19 @@ def _enrich_tasks_with_sync_info(tasks: list[TaskResponse]) -> list[TaskResponse
         target = sr["sync_target"]
         if target not in sync_map[tid]:
             # First (latest due to ORDER BY) entry per target wins
-            sync_map[tid][target] = sr["sync_status"]
+            sync_map[tid][target] = {
+                "status": sr["sync_status"],
+                "last_synced_at": sr["last_synced_at"],
+            }
 
     enriched = []
     for t in tasks:
         t_dict = t.model_dump()
         if t.task_id in sync_map:
-            cal_status = sync_map[t.task_id].get("apple_calendar")
-            if cal_status is not None:
-                t_dict["last_sync_status"] = cal_status
+            cal_sync = sync_map[t.task_id].get("apple_calendar")
+            if cal_sync is not None:
+                t_dict["last_sync_status"] = cal_sync["status"]
+                t_dict["last_synced_at"] = cal_sync["last_synced_at"]
         enriched.append(TaskResponse(**t_dict))
     return enriched
 
