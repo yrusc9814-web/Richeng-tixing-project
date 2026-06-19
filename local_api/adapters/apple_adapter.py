@@ -359,6 +359,7 @@ class AppleSyncAdapter(SyncAdapter):
         try:
             cmd = [
                 "/usr/bin/open",
+                "-g",
                 "-n",
                 "-W",
                 helper_app,

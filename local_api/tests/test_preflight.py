@@ -367,6 +367,40 @@ class TestPreflightInternalCheckFunctions:
         assert result["ok"] is False
         assert "missing" in result["detail"] or "not executable" in result["detail"]
 
+    def test_calendar_helper_auth_opens_bundle_in_background(self, tmp_path, monkeypatch):
+        helper_app = tmp_path / "LifeSyncCalendarHelper.app"
+        helper_bin = helper_app / "Contents" / "MacOS" / "LifeSyncCalendarHelper"
+        helper_bin.parent.mkdir(parents=True)
+        helper_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+        helper_bin.chmod(0o755)
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            report_path = cmd[cmd.index("--report-file") + 1]
+            with open(report_path, "w", encoding="utf-8") as report_file:
+                report_file.write(
+                    '{"mode":"check_access",'
+                    '"bundleIdentifier":"com.vanta.lifesync.calendar-helper",'
+                    '"calendarAccessGranted":true,"calendarCount":1}'
+                )
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        monkeypatch.setattr("local_api.preflight.subprocess.run", fake_run)
+
+        result = _check_calendar_helper_auth(helper_app)
+
+        assert result["ok"] is True
+        assert captured["cmd"][:5] == [
+            "/usr/bin/open",
+            "-g",
+            "-n",
+            "-W",
+            str(helper_app),
+        ]
+        assert captured["cmd"][5] == "--args"
+        assert helper_bin.as_posix() not in captured["cmd"]
+
     def test_rollback_cleanup_returns_true(self):
         """Rollback/cleanup check returns True on valid codebase."""
         result = _check_rollback_cleanup_rules()

@@ -411,6 +411,7 @@ def _check_calendar_helper_auth(helper_app: Path) -> dict:
         result = subprocess.run(
             [
                 "/usr/bin/open",
+                "-g",
                 "-n",
                 "-W",
                 str(helper_app),

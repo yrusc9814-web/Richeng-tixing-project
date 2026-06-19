@@ -11,6 +11,7 @@ Run with:
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from typing import Optional
@@ -449,6 +450,44 @@ class TestAppleSyncAdapterRealMode:
         assert result.success is True
         assert result.sync_result == "success"
         assert result.error_code != "not_implemented"
+
+    def test_real_mode_calendar_opens_helper_bundle_in_background(self, monkeypatch):
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            payload_path = cmd[cmd.index("--payload-file") + 1]
+            report_path = cmd[cmd.index("--report-file") + 1]
+            with open(payload_path, encoding="utf-8") as payload_file:
+                payload = json.load(payload_file)
+            with open(report_path, "w", encoding="utf-8") as report_file:
+                json.dump(
+                    {
+                        "mode": "write_event",
+                        "task_id": payload["task_id"],
+                        "run_id": payload["run_id"],
+                        "success": True,
+                        "external_id": "event_background_launch",
+                        "error_code": None,
+                        "error_message": None,
+                    },
+                    report_file,
+                )
+            return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        result = AppleSyncAdapter(target="apple_calendar")._push_real(
+            _SAMPLE_TASK,
+            _SAMPLE_STATE,
+        )
+
+        assert result.success is True
+        assert captured["cmd"][0:4] == ["/usr/bin/open", "-g", "-n", "-W"]
+        assert captured["cmd"][5] == "--args"
+        assert captured["cmd"][4].endswith("LifeSyncCalendarHelper.app")
+        helper_binary = captured["cmd"][4] + "/Contents/MacOS/LifeSyncCalendarHelper"
+        assert helper_binary not in captured["cmd"]
 
     def test_real_mode_calendar_missing_eventkit_is_structured_error(self, monkeypatch):
         """Missing EventKit must be reported, not surfaced as an exception."""
