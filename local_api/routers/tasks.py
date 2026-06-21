@@ -385,6 +385,12 @@ def create_task(request: Request, body: TaskCreateRequest):
     return enriched[0] if enriched else result
 
 
+@router.post("/create", status_code=201, response_model=TaskResponse)
+def create_task_alias(request: Request, body: TaskCreateRequest):
+    """Alias for POST /api/tasks/create."""
+    return create_task(request, body)
+
+
 # ── GET /api/tasks ─────────────────────────────────────────────────────────
 
 
@@ -505,6 +511,40 @@ def list_tasks(
         paginated = tasks
 
     return TaskListResponse(tasks=paginated, total=total, limit=limit, offset=offset)
+
+
+@router.get("/list", response_model=TaskListResponse)
+def list_tasks_alias(
+    request: Request,
+    status: Optional[str] = Query(default=None, description="Filter by status (pending/completed/cancelled)"),
+    priority: Optional[str] = Query(default=None, description="Filter by priority (P0/P1/P2/P3)"),
+    search: Optional[str] = Query(default=None, description="Search in title, description, location"),
+    sync_status: Optional[str] = Query(default=None, description="Filter by sync_status (pending/in_progress/synced/failed/failed_permanent/skipped/stale/not_synced)"),
+    start_date: Optional[str] = Query(default=None, description="Filter: start_time >= this date/ISO datetime"),
+    end_date: Optional[str] = Query(default=None, description="Filter: due_time <= this date/ISO datetime"),
+    date: Optional[str] = Query(default=None, description="Filter tasks occurring on this YYYY-MM-DD date"),
+    sort: Optional[str] = Query(default=None, description="Alias for sort_by"),
+    sort_by: str = Query(default="created_at", description="Sort column (created_at, updated_at, start_time, due_time, title, priority, status)"),
+    sort_order: str = Query(default="desc", description="Sort order (asc/desc)"),
+    limit: int = Query(default=DEFAULT_LIMIT, ge=1, le=MAX_LIMIT, description="Max tasks per page"),
+    offset: int = Query(default=0, ge=0, description="Pagination offset"),
+):
+    """Alias for GET /api/tasks/list."""
+    return list_tasks(
+        request=request,
+        status=status,
+        priority=priority,
+        search=search,
+        sync_status=sync_status,
+        start_date=start_date,
+        end_date=end_date,
+        date=date,
+        sort=sort,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        limit=limit,
+        offset=offset,
+    )
 
 
 # ── GET /api/tasks/{task_id} ───────────────────────────────────────────────

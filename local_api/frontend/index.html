@@ -12,46 +12,41 @@
     <aside class="sidebar">
       <div class="sidebar-logo">
         <div class="logo-icon">L</div>
-        <span>LifeSync Hub</span>
+        <span>LifeSync</span>
       </div>
-        <div class="sidebar-section">
-          <div class="sidebar-section-title">日程筛选</div>
-          <div class="sidebar-filter active" data-tab="all">全部日程</div>
-          <div class="sidebar-filter" data-tab="today">今日日程</div>
-          <div class="sidebar-filter" data-tab="upcoming">即将开始</div>
-          <div class="sidebar-filter" data-tab="future">未来日程</div>
-          <div class="sidebar-filter" data-tab="archived">已归档</div>
-          <div class="sidebar-filter" data-tab="sync-error">同步异常</div>
-          <div class="sidebar-filter" data-tab="failed">同步失败</div>
-          <div class="sidebar-filter" data-tab="pending-sync">待同步</div>
-          <div class="sidebar-filter" data-tab="synced">已同步</div>
-          <div class="sidebar-filter" data-tab="stale">已过期</div>
-        </div>
-
-        <nav class="sidebar-nav">
-          <div class="nav-item active" data-nav="schedule"><span class="nav-icon">📅</span> 日程</div>
-          <div class="nav-item" onclick="showCreateModal()"><span class="nav-icon">➕</span> 创建日程</div>
-          <div class="nav-item" data-nav="tasks"><span class="nav-icon">📋</span> 任务管理</div>
-          <div class="nav-item" data-nav="sync"><span class="nav-icon">🔄</span> 同步状态</div>
-          <div class="nav-item" data-nav="calendar-settings"><span class="nav-icon">⚙️</span> 日历设置</div>
-          <div class="nav-item" data-nav="system-settings"><span class="nav-icon">🔧</span> 系统设置</div>
-          <div class="nav-item" data-nav="logs"><span class="nav-icon">📝</span> 日志</div>
-          <div class="nav-item" data-nav="about"><span class="nav-icon">ℹ️</span> 关于</div>
-        </nav>
-
+      <nav class="sidebar-nav">
+        <div class="nav-item active" data-tab="all"><span class="nav-icon">📅</span> 日程</div>
+        <div class="nav-item" onclick="showCreateModal()"><span class="nav-icon">➕</span> 创建日程</div>
+        <div class="nav-item" data-tab="all"><span class="nav-icon">📋</span> 任务管理</div>
+        <div class="nav-item" data-tab="synced"><span class="nav-icon">🔄</span> 同步状态</div>
+        <div class="nav-item" data-nav="calendar-settings"><span class="nav-icon">⚙️</span> 日历设置</div>
+        <div class="nav-item" data-nav="system-settings"><span class="nav-icon">🔧</span> 系统设置</div>
+        <div class="nav-item" data-nav="logs"><span class="nav-icon">📝</span> 日志</div>
+        <div class="nav-item" data-nav="about"><span class="nav-icon">ℹ️</span> 关于</div>
+      </nav>
       <div class="sidebar-footer">
         <div class="system-status-card">
+          <div class="status-header">
+            <span class="status-dot status-dot-green"></span>
+            <span class="status-label">系统状态</span>
+          </div>
+          <div class="status-value-text">正常运行中</div>
+          <div class="status-divider"></div>
+          <div class="status-row">
+            <span class="status-label">主 Agent</span>
+            <span class="status-value" id="sys-agent-status">远程中</span>
+          </div>
+          <div class="status-row">
+            <span class="status-label">客服 Agent</span>
+            <span class="status-value" id="sys-agent2-status">运行中</span>
+          </div>
           <div class="status-row">
             <span class="status-label">数据库</span>
             <span class="status-value" id="sys-db-status">检查中...</span>
           </div>
           <div class="status-row">
-            <span class="status-label">任务数</span>
-            <span class="status-value" id="sys-task-count">-</span>
-          </div>
-          <div class="status-row">
-            <span class="status-label">API</span>
-            <span class="status-value">运行中</span>
+            <span class="status-label">Apple Calendar</span>
+            <span class="status-value" id="sys-calendar-status">连接中</span>
           </div>
         </div>
       </div>
@@ -64,7 +59,7 @@
         <div class="header-left">
           <div>
             <div class="header-title">日程管理</div>
-            <div class="header-subtitle">LifeSync Hub 本地日程管理</div>
+            <div class="header-subtitle">管理你的日程安排，高效规划每一天</div>
           </div>
         </div>
         <div class="header-right">
@@ -81,31 +76,43 @@
         <!-- Top Cards -->
         <div class="cards-row">
           <div class="stat-card primary">
-            <div class="stat-icon">📅</div>
-            <div class="stat-value" id="stat-all">0</div>
-            <div class="stat-label">全部日程</div>
+            <div class="stat-icon-wrap">📅</div>
+            <div class="stat-content">
+              <div class="stat-value" id="stat-all">0</div>
+              <div class="stat-label">全部日程</div>
+              <div class="stat-card-caption">当前已创建的全部日程</div>
+            </div>
           </div>
           <div class="stat-card success">
-            <div class="stat-icon">📌</div>
-            <div class="stat-value" id="stat-today">0</div>
-            <div class="stat-label">今日日程</div>
+            <div class="stat-icon-wrap">📌</div>
+            <div class="stat-content">
+              <div class="stat-value" id="stat-today">0</div>
+              <div class="stat-label">今日日程</div>
+              <div class="stat-card-caption">今天需要处理的日程</div>
+            </div>
           </div>
           <div class="stat-card warning">
-            <div class="stat-icon">⏰</div>
-            <div class="stat-value" id="stat-upcoming">0</div>
-            <div class="stat-label">即将开始</div>
+            <div class="stat-icon-wrap">⏰</div>
+            <div class="stat-content">
+              <div class="stat-value" id="stat-upcoming">0</div>
+              <div class="stat-label">即将开始</div>
+              <div class="stat-card-caption">接下来即将开始的日程</div>
+            </div>
           </div>
           <div class="stat-card info">
-            <div class="stat-icon">📆</div>
-            <div class="stat-value" id="stat-future">0</div>
-            <div class="stat-label">未来日程</div>
+            <div class="stat-icon-wrap">📆</div>
+            <div class="stat-content">
+              <div class="stat-value" id="stat-future">0</div>
+              <div class="stat-label">未来日程</div>
+              <div class="stat-card-caption">未来 7 天待执行的日程</div>
+            </div>
           </div>
         </div>
 
         <!-- Content Area: Table + Info Panel -->
         <div class="content-area">
           <!-- Table Section -->
-          <section class="table-section">
+          <section class="table-section" id="table-section">
             <!-- Toolbar -->
             <div class="table-toolbar">
               <div class="tabs">
@@ -115,7 +122,12 @@
                 <button class="tab-item" data-tab="future">未来日程</button>
               </div>
               <div class="toolbar-right">
-                <input type="text" class="search-input" id="search-input" placeholder="搜索标题、描述、地点...">
+                <div class="view-toggle">
+                  <button class="view-toggle-btn active" data-view="table" onclick="switchView('table')">📊 表格</button>
+                  <button class="view-toggle-btn" data-view="cards" onclick="switchView('cards')">📋 卡片</button>
+                </div>
+                <input type="text" class="search-input" id="search-input" placeholder="搜索日程标题...">
+                <button class="btn btn-icon btn-filter" title="筛选">⚲</button>
               </div>
             </div>
 
@@ -125,18 +137,12 @@
                 <thead>
                   <tr>
                     <th style="width:4%"><input type="checkbox" id="select-all-tasks" aria-label="选择全部日程"></th>
-                    <th style="width:18%">标题</th>
-                    <th style="width:13%">开始时间</th>
-                    <th style="width:13%">结束时间</th>
-                    <th style="width:13%">地点</th>
-                    <th style="width:9%">类型</th>
-                    <th style="width:10%">提醒策略</th>
-                    <th style="width:8%">天气敏感</th>
-                    <th style="width:9%">任务状态</th>
-                    <th style="width:10%">同步状态</th>
-                    <th style="width:10%">同步目标</th>
-                    <th style="width:12%">更新时间</th>
-                    <th style="width:13%">操作</th>
+                    <th style="width:25%">标题</th>
+                    <th style="width:15%">开始时间</th>
+                    <th style="width:15%">结束时间</th>
+                    <th style="width:12%">状态</th>
+                    <th style="width:15%">日历</th>
+                    <th style="width:14%">操作</th>
                   </tr>
                 </thead>
                 <tbody id="table-body"></tbody>
@@ -153,11 +159,29 @@
             <!-- Pagination -->
             <div class="table-pagination">
               <span class="pagination-info" id="pagination-info">共 0 条</span>
+              <div class="pagination-controls">
+                <button class="btn btn-sm pagination-btn" disabled>‹</button>
+                <button class="btn btn-sm pagination-btn active">1</button>
+                <button class="btn btn-sm pagination-btn" disabled>›</button>
+                <span class="page-size-label">10 条/页</span>
+              </div>
             </div>
           </section>
 
+          <!-- Task Cards Container (hidden by default, shown in cards view) -->
+          <div class="task-cards-container" id="task-cards-container" style="display:none;"></div>
+
           <!-- Right Info Panel -->
           <aside class="info-panel">
+            <!-- Task Detail (dynamic, shown when a card is selected) -->
+            <div class="info-card detail-card" id="task-detail-card" style="display:none;">
+              <div class="info-card-header">
+                <span>📋 任务详情</span>
+                <button class="btn btn-sm" onclick="closeTaskDetail()" style="padding:2px 8px;">✕</button>
+              </div>
+              <div class="info-card-body" id="task-detail-body"></div>
+            </div>
+
             <!-- Calendar View -->
             <div class="info-card">
               <div class="info-card-header">
@@ -187,29 +211,10 @@
             <div class="info-card">
               <div class="info-card-header">
                 <span>🔄 同步状态</span>
+                <button class="btn btn-sm" onclick="refreshTasks()" style="padding:2px 8px;">🔄 刷新</button>
               </div>
               <div class="info-card-body">
                 <div class="sync-status-summary" id="sync-summary"></div>
-              </div>
-            </div>
-
-            <!-- Reminder Status -->
-            <div class="info-card">
-              <div class="info-card-header">
-                <span>🔔 提醒状态</span>
-              </div>
-              <div class="info-card-body">
-                <div class="sync-status-summary" id="reminder-summary"></div>
-              </div>
-            </div>
-
-            <!-- Weather Overview -->
-            <div class="info-card">
-              <div class="info-card-header">
-                <span>🌦 天气概览</span>
-              </div>
-              <div class="info-card-body">
-                <div class="sync-status-summary" id="weather-summary"></div>
               </div>
             </div>
           </aside>

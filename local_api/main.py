@@ -25,12 +25,14 @@ from .routers import (
     sync_logs_router,
     sync_routes_router,
     reminders_router,
+    lifesync_router,
 )
 from .services.sync_service import SyncService
 from .scheduler.sync_scheduler import SyncScheduler
 from .sync_engine import SyncEngine
 
-from .adapters.apple_adapter import MockAppleAdapter
+from .adapters import SyncAdapter
+from .adapters.apple_adapter import AppleSyncAdapter
 
 # ── Logging ────────────────────────────────────────────────────────────────
 
@@ -52,7 +54,7 @@ logger.addHandler(ch)
 
 # ── Engine instance (module-level) ─────────────────────────────────────────
 
-_adapters = [MockAppleAdapter()] if config.ADAPTER_ENABLED else []
+_adapters: list[SyncAdapter] = [AppleSyncAdapter(target="apple_calendar", dry_run=False, test_mode=False)] if config.ADAPTER_ENABLED else []
 engine = SyncEngine(adapters=_adapters)
 sync_service = SyncService(adapters=_adapters)
 scheduler = SyncScheduler(sync_service=sync_service)
@@ -98,6 +100,7 @@ app = FastAPI(
 app.add_middleware(AuthAndValidationMiddleware)
 
 # Register routers
+app.include_router(lifesync_router)
 app.include_router(tasks_router)
 app.include_router(system_router)
 app.include_router(sync_router)

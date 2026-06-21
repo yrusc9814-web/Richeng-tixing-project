@@ -365,7 +365,8 @@ class TestFrontendServing:
         resp = client.get("/frontend/")
         assert resp.status_code == 200
         content = resp.text
-        for header in ("标题", "开始时间", "结束时间", "地点", "任务状态", "同步状态", "同步目标", "更新时间"):
+        # Redesigned table: 7 columns matching reference image
+        for header in ("标题", "开始时间", "结束时间", "状态", "日历", "操作"):
             assert header in content
 
     def test_frontend_archive_uses_cancelled_status_not_delete(self):

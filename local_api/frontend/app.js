@@ -56,6 +56,7 @@ let searchQuery = '';
 let currentFormMode = 'view'; // 'view', 'edit', 'create'
 let selectedTaskId = null;
 let selectedDate = null; // ISO date string (YYYY-MM-DD) or null
+let hasRenderedTaskCards = false;
 
 // ── Utility Functions ────────────────────────────────────────────────────
 
@@ -224,6 +225,76 @@ async function fetchWeatherOverview() {
   return apiFetch('/api/local/weather/overview');
 }
 
+async function evaluateLifeSyncWeather(taskId) {
+  return apiFetch('/api/weather/evaluate', {
+    method: 'POST',
+    body: JSON.stringify({ task_id: taskId }),
+  });
+}
+
+async function sendLifeSyncWeChat(taskId) {
+  return apiFetch('/api/wechat/send', {
+    method: 'POST',
+    body: JSON.stringify({ task_id: taskId, trigger_type: 'manual' }),
+  });
+}
+
+async function syncLifeSyncCalendar(taskId) {
+  return apiFetch('/api/calendar/sync', {
+    method: 'POST',
+    body: JSON.stringify({ task_id: taskId, sync_target: 'apple_calendar' }),
+  });
+}
+
+function renderLifeSyncTaskSelect() {
+  const select = $('#lifesync-task-select');
+  if (!select) return;
+  const active = currentTasks.filter(t => t.status !== 'cancelled');
+  if (active.length === 0) {
+    select.innerHTML = '<option value="">暂无可操作任务</option>';
+    return;
+  }
+  const current = select.value;
+  select.innerHTML = active.map(t => `<option value="${escapeHtml(t.task_id)}">${escapeHtml(t.title)} · ${formatDatetime(t.start_time || t.due_time)}</option>`).join('');
+  if (current && active.some(t => t.task_id === current)) select.value = current;
+}
+
+function renderLifeSyncResult(payload) {
+  const node = $('#lifesync-result');
+  if (!node) return;
+  node.textContent = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+}
+
+async function runLifeSyncAction(action) {
+  const select = $('#lifesync-task-select');
+  const taskId = select && select.value;
+  if (!taskId) {
+    showToast('请先选择任务', 'warning');
+    return;
+  }
+  showLoading(true);
+  try {
+    let result;
+    if (action === 'weather') {
+      result = await evaluateLifeSyncWeather(taskId);
+    } else if (action === 'wechat') {
+      result = await sendLifeSyncWeChat(taskId);
+    } else if (action === 'calendar') {
+      result = await syncLifeSyncCalendar(taskId);
+    } else {
+      throw new Error(`未知动作: ${action}`);
+    }
+    renderLifeSyncResult(result);
+    showToast(result.ok ? '闭环动作已执行' : `闭环动作受阻: ${result.error || result.reason || result.status}`, result.ok ? 'success' : 'warning');
+    await refreshTasks();
+  } catch (err) {
+    renderLifeSyncResult({ ok: false, error: err.message });
+    showToast('闭环动作失败: ' + err.message, 'error');
+  } finally {
+    showLoading(false);
+  }
+}
+
 // ── Task Filtering/Grouping ──────────────────────────────────────────────
 
 function getTodayRange() {
@@ -339,8 +410,7 @@ function renderTable() {
 
   tbody.innerHTML = filtered.map(task => {
     const syncStatus = task.last_sync_status || 'not_synced';
-    const syncTargets = (task.sync_targets || []).map(getSyncTargetLabel).join(', ') || '-';
-    const syncTargetDisplay = task.sync_enabled ? syncTargets : '-';
+    const syncTargets = task.sync_enabled ? (task.sync_targets || []).map(getSyncTargetLabel).join(', ') || '-' : '-';
 
     return `
       <tr class="${task.task_id === selectedTaskId ? 'selected' : ''}" onclick="selectTaskRow('${task.task_id}')">
@@ -348,14 +418,8 @@ function renderTable() {
         <td class="task-title" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</td>
         <td class="time-cell">${formatDatetime(task.start_time)}</td>
         <td class="time-cell">${formatDatetime(task.due_time)}</td>
-        <td class="location-cell" title="${escapeHtml(task.location || '')}">${escapeHtml(task.location || '-')}</td>
-        <td>${escapeHtml(SCHEDULE_TYPE_LABELS[task.schedule_type] || task.schedule_type || '-')}</td>
-        <td>${escapeHtml(NOTIFY_POLICY_LABELS[task.notify_policy] || task.notify_policy || '-')}</td>
-        <td>${task.weather_sensitive ? '是' : '否'}</td>
-        <td>${getStatusChipHtml(task.status, 'task')}</td>
         <td>${getStatusChipHtml(syncStatus, 'sync')}</td>
-        <td style="font-size:12px">${escapeHtml(syncTargetDisplay)}</td>
-        <td class="time-cell">${formatDatetime(task.updated_at)}</td>
+        <td style="font-size:12px">${escapeHtml(syncTargets)}</td>
         <td class="actions-cell">
           <button class="btn-icon" onclick="event.stopPropagation(); viewTask('${task.task_id}')" title="查看">👁</button>
           <button class="btn-icon" onclick="event.stopPropagation(); editTask('${task.task_id}')" title="编辑">✏️</button>
@@ -384,8 +448,6 @@ function renderInfoPanel() {
   renderTodayList();
   renderUpcomingList();
   renderSyncSummary();
-  renderReminderSummary();
-  renderWeatherSummary();
   renderCalendarMini();
 }
 
@@ -398,11 +460,25 @@ function renderTodayList() {
   }
   container.innerHTML = todayTasks.slice(0, 5).map(t => {
     const syncStatus = t.last_sync_status || 'not_synced';
+    const now = new Date();
+    const startTime = t.start_time ? new Date(t.start_time) : null;
+    let dotColor = 'green';
+    let badgeClass = 'green';
+    let badgeText = '进行中';
+    if (startTime && startTime > now) {
+      const diffMin = (startTime - now) / 60000;
+      if (diffMin <= 60) {
+        dotColor = 'orange'; badgeClass = 'orange'; badgeText = '即将开始';
+      } else {
+        dotColor = 'purple'; badgeClass = 'purple'; badgeText = '稍后开始';
+      }
+    }
     return `
       <div class="info-today-item">
+        <span class="today-dot ${dotColor}"></span>
         <span class="info-today-time">${formatDatetime(t.start_time || t.due_time)}</span>
         <span class="info-today-title" title="${escapeHtml(t.title)}">${escapeHtml(t.title)}</span>
-        <span class="info-status-line">${STATUS_TASK_LABELS[t.status] || t.status} · ${STATUS_SYNC_LABELS[syncStatus] || syncStatus}</span>
+        <span class="today-badge ${badgeClass}">${badgeText}</span>
       </div>
     `;
   }).join('');
@@ -566,7 +642,9 @@ function selectCalendarDate(dateStr) {
     // Reset tab to 'all' when selecting a date
     currentTab = 'all';
     $$('.tab-item').forEach(el => el.classList.toggle('active', el.dataset.tab === 'all'));
-    $$('.sidebar-filter').forEach(el => el.classList.toggle('active', el.dataset.tab === 'all'));
+    $$('.nav-item').forEach(el => {
+      if (el.dataset.tab) el.classList.toggle('active', el.dataset.tab === 'all');
+    });
   }
   renderCalendarMini();
   renderTable();
@@ -575,8 +653,9 @@ function selectCalendarDate(dateStr) {
 function renderSystemStatus() {
   fetchSystemStatus()
     .then(data => {
-      $('#sys-db-status').textContent = data.db_connected ? '已连接' : '断开';
-      $('#sys-task-count').textContent = data.task_count;
+      $('#sys-db-status').textContent = data.db_connected ? '正常' : '断开';
+      const calEl = $('#sys-calendar-status');
+      if (calEl) calEl.textContent = data.db_connected ? '已连接' : '未连接';
     })
     .catch(() => {
       $('#sys-db-status').textContent = '错误';
@@ -594,8 +673,13 @@ async function refreshTasks() {
     const stats = computeStats();
     renderStats();
     renderTable();
+    renderTaskCards(currentTasks);
     renderInfoPanel();
     renderSystemStatus();
+    if (selectedTaskId && $('#task-detail-card')?.style.display !== 'none') {
+      const selectedTask = currentTasks.find(t => t.task_id === selectedTaskId);
+      if (selectedTask) renderTaskDetail(selectedTask);
+    }
   } catch (err) {
     showToast('加载任务失败: ' + err.message, 'error');
   } finally {
@@ -820,7 +904,9 @@ function switchTab(tab) {
   currentTab = tab;
   selectedDate = null; // Clear calendar date selection on tab switch
   $$('.tab-item').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
-  $$('.sidebar-filter').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
+  $$('.nav-item').forEach(el => {
+    if (el.dataset.tab) el.classList.toggle('active', el.dataset.tab === tab);
+  });
   renderTable();
   renderCalendarMini(); // Re-render to clear selected date highlight
 }
@@ -842,11 +928,15 @@ document.addEventListener('DOMContentLoaded', () => {
     el.addEventListener('click', () => switchTab(el.dataset.tab));
   });
 
-  // Nav item click handlers
+  // Nav item click handlers — items with data-tab act as tab switchers
   $$('.nav-item').forEach(el => {
     el.addEventListener('click', () => {
+      const tab = el.dataset.tab;
       $$('.nav-item').forEach(e => e.classList.remove('active'));
       el.classList.add('active');
+      if (tab) {
+        switchTab(tab);
+      }
     });
   });
 
@@ -874,3 +964,247 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter') handleSearch();
   });
 });
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// LifeSync UI Redesign — Task Cards + Detail Panel + Animations
+// ════════════════════════════════════════════════════════════════════════════
+
+var currentView = 'cards';
+
+// ── View Toggle ────────────────────────────────────────────────────────────
+function switchView(view) {
+  currentView = view;
+  $$('.view-toggle-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === view);
+  });
+  const cardsContainer = $('#task-cards-container');
+  const tableSection = $('#table-section');
+  if (view === 'cards') {
+    if (cardsContainer) cardsContainer.style.display = '';
+    if (tableSection) tableSection.style.display = 'none';
+  } else {
+    if (cardsContainer) cardsContainer.style.display = 'none';
+    if (tableSection) tableSection.style.display = '';
+  }
+  requestAnimationFrame(() => {
+    if (cardsContainer) cardsContainer.classList.toggle('is-visible', view === 'cards');
+    if (tableSection) tableSection.classList.toggle('is-visible', view !== 'cards');
+  });
+}
+
+// ── Render Task Cards ──────────────────────────────────────────────────────
+function renderTaskCards(tasks) {
+  const container = $('#task-cards-container');
+  if (!container) return;
+  if (!tasks || tasks.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const animateClass = hasRenderedTaskCards ? '' : ' task-card--animate-in';
+  container.innerHTML = tasks.map(t => {
+    const syncStatus = t.last_sync_status || 'not_synced';
+    const statusClass = `status-${syncStatus}`;
+    const priority = t.priority || 'P2';
+    const timeStr = formatDatetime(t.start_time || t.due_time) || '未设置时间';
+    const location = t.location ? `<span class="task-card-meta-item">📍 ${escapeHtml(t.location)}</span>` : '';
+    const weatherHtml = t.need_weather_check
+      ? `<span class="task-card-weather">🌤 天气敏感</span>`
+      : '';
+    const scheduleLabel = getScheduleTypeLabel(t.schedule_type) || '';
+    const syncTargets = (t.sync_targets || []).map(getSyncTargetLabel).join(', ');
+    const title = escapeHtml(t.title);
+
+    return `
+      <div class="task-card ${statusClass}${animateClass}" role="button" tabindex="0" aria-label="查看任务 ${title}" onclick="selectTaskCard('${t.task_id}')" onkeydown="handleTaskCardKeydown(event, '${t.task_id}')">
+        <div class="task-card-header">
+          <div class="task-card-title" title="${title}">${title}</div>
+          <div class="task-card-priority ${priority}">${priority}</div>
+        </div>
+        <div class="task-card-meta">
+          <span class="task-card-meta-item">⏰ ${timeStr}</span>
+          ${location}
+          <span class="task-card-meta-item">📋 ${scheduleLabel}</span>
+          <span class="task-card-meta-item">🔄 ${syncTargets}</span>
+        </div>
+        <div class="task-card-status-row">
+          ${getStatusChipHtml(syncStatus, 'sync')}
+          ${weatherHtml}
+        </div>
+        <div class="task-card-actions" onclick="event.stopPropagation()">
+          <button class="btn btn-sm" aria-label="天气评估" onclick="runLifeSyncActionForTask('${t.task_id}', 'weather', this)">🌦</button>
+          <button class="btn btn-sm" aria-label="微信通知" onclick="runLifeSyncActionForTask('${t.task_id}', 'wechat', this)">💬</button>
+          <button class="btn btn-sm" aria-label="日历同步" onclick="runLifeSyncActionForTask('${t.task_id}', 'calendar', this)">📅</button>
+          <button class="btn btn-sm" aria-label="查看详情" onclick="viewTask('${t.task_id}')">👁</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+  hasRenderedTaskCards = true;
+}
+
+function handleTaskCardKeydown(event, taskId) {
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    selectTaskCard(taskId);
+  }
+}
+
+// ── Select Task Card → Show Detail ─────────────────────────────────────────
+async function selectTaskCard(taskId) {
+  selectedTaskId = taskId;
+  const card = $('#task-detail-card');
+  const empty = $('#detail-empty-state');
+  const body = $('#task-detail-body');
+  if (empty) empty.style.display = 'none';
+  if (card) card.style.display = '';
+  if (body) body.innerHTML = '<div class="skeleton skeleton-line medium"></div><div class="skeleton skeleton-line"></div><div class="skeleton skeleton-line short"></div>';
+  try {
+    const task = await fetchTask(taskId);
+    if (!task) return;
+    renderTaskDetail(task);
+  } catch (err) {
+    showToast('加载详情失败: ' + err.message, 'error');
+  }
+}
+
+// ── Close Task Detail ──────────────────────────────────────────────────────
+function closeTaskDetail() {
+  selectedTaskId = null;
+  const card = $('#task-detail-card');
+  const empty = $('#detail-empty-state');
+  if (card) {
+    card.classList.add('detail-card--closing');
+    setTimeout(() => {
+      card.style.display = 'none';
+      card.classList.remove('detail-card--closing');
+      if (empty) empty.style.display = '';
+    }, 150);
+  } else if (empty) {
+    empty.style.display = '';
+  }
+}
+
+// ── Render Task Detail Panel ───────────────────────────────────────────────
+function renderTaskDetail(task) {
+  const card = $('#task-detail-card');
+  const empty = $('#detail-empty-state');
+  const body = $('#task-detail-body');
+  if (!card || !body) return;
+
+  const syncStatus = task.last_sync_status || 'not_synced';
+  const syncLabel = STATUS_SYNC_LABELS[syncStatus] || syncStatus;
+
+  body.innerHTML = `
+    <div class="detail-section">
+      <div class="detail-field">
+        <span class="detail-field-label">标题</span>
+        <span class="detail-field-value" title="${escapeHtml(task.title)}">${escapeHtml(task.title)}</span>
+      </div>
+      <div class="detail-field">
+        <span class="detail-field-label">优先级</span>
+        <span class="detail-field-value">${task.priority || 'P2'}</span>
+      </div>
+      <div class="detail-field">
+        <span class="detail-field-label">开始</span>
+        <span class="detail-field-value">${formatDatetime(task.start_time) || '-'}</span>
+      </div>
+      <div class="detail-field">
+        <span class="detail-field-label">结束</span>
+        <span class="detail-field-value">${formatDatetime(task.due_time) || '-'}</span>
+      </div>
+      <div class="detail-field">
+        <span class="detail-field-label">地点</span>
+        <span class="detail-field-value">${escapeHtml(task.location || '-')}</span>
+      </div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-section-title">同步状态</div>
+      <div class="detail-field">
+        <span class="detail-field-label">状态</span>
+        ${getStatusChipHtml(syncStatus, 'sync')}
+      </div>
+      <div class="detail-field">
+        <span class="detail-field-label">目标</span>
+        <span class="detail-field-value">${(task.sync_targets || []).map(getSyncTargetLabel).join(', ')}</span>
+      </div>
+      <div class="detail-field">
+        <span class="detail-field-label">外部ID</span>
+        <span class="detail-field-value" title="${task.apple_external_id || ''}">${(task.apple_external_id || '-').substring(0, 24)}</span>
+      </div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-section-title">闭环操作</div>
+      <div class="detail-actions">
+        <button class="btn btn-sm" aria-label="天气评估" onclick="runLifeSyncActionForTask('${task.task_id}', 'weather', this)">🌦 天气</button>
+        <button class="btn btn-sm" aria-label="微信通知" onclick="runLifeSyncActionForTask('${task.task_id}', 'wechat', this)">💬 微信</button>
+        <button class="btn btn-sm" aria-label="日历同步" onclick="runLifeSyncActionForTask('${task.task_id}', 'calendar', this)">📅 日历</button>
+        <button class="btn btn-sm" aria-label="刷新详情" onclick="selectTaskCard('${task.task_id}')">🔄 刷新</button>
+      </div>
+    </div>
+  `;
+
+  if (empty) empty.style.display = 'none';
+  card.style.display = '';
+}
+
+// ── Run LifeSync Action for specific task ──────────────────────────────────
+async function runLifeSyncActionForTask(taskId, action, buttonEl) {
+  const endpoints = {
+    weather: '/api/weather/evaluate',
+    wechat: '/api/wechat/send',
+    calendar: '/api/calendar/sync',
+  };
+  const bodies = {
+    weather: { task_id: taskId },
+    wechat: { task_id: taskId, trigger_type: 'manual' },
+    calendar: { task_id: taskId, sync_target: 'apple_calendar' },
+  };
+  const labels = {
+    weather: '天气评估',
+    wechat: '微信通知',
+    calendar: '日历同步',
+  };
+  const originalText = buttonEl ? buttonEl.textContent : '';
+  if (buttonEl) {
+    buttonEl.disabled = true;
+    buttonEl.classList.add('btn-loading');
+    buttonEl.textContent = '处理中…';
+  }
+
+  try {
+    const result = await apiFetch(endpoints[action], {
+      method: 'POST',
+      body: JSON.stringify(bodies[action]),
+    });
+
+    if (result.ok || result.status === 'synced' || result.status === 'evaluated' || result.status === 'sent') {
+      showToast(`${labels[action]} 成功`, 'success');
+    } else if (result.status === 'blocked' || result.status === 'skipped') {
+      showToast(`${labels[action]}: ${result.error || result.status}`, 'warning');
+    } else {
+      showToast(`${labels[action]}: ${result.error || '未知状态'}`, 'error');
+    }
+
+    // Refresh task data
+    await refreshTasks();
+    // Re-select the task to update detail panel
+    if (selectedTaskId) {
+      setTimeout(() => selectTaskCard(selectedTaskId), 300);
+    }
+  } catch (err) {
+    showToast(`${labels[action]} 失败: ${err.message}`, 'error');
+  } finally {
+    if (buttonEl) {
+      buttonEl.disabled = false;
+      buttonEl.classList.remove('btn-loading');
+      buttonEl.textContent = originalText;
+    }
+  }
+}
+
+// ── Initialize view on page load ───────────────────────────────────────────
+// Call directly since script loads at end of body (DOM is ready)
+switchView('table');
+

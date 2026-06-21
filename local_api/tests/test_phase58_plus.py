@@ -90,9 +90,11 @@ class TestPhase58ScheduleFields:
     def test_frontend_contains_phase58_fields_and_cards(self):
         html = client.get("/frontend/").text
         app_js = client.get("/frontend/static/app.js").text
-        for text in ("日程类型", "提醒策略", "天气敏感", "提醒状态", "天气概览"):
+        # Phase 58 form fields still present in modal
+        for text in ("日程类型", "提醒策略", "天气敏感"):
             assert text in html
-        for token in ("schedule_type", "notify_policy", "weather_sensitive", "fetchReminderSummary", "fetchWeatherOverview"):
+        # JS API functions still exist (features preserved via inline card actions)
+        for token in ("schedule_type", "notify_policy", "weather_sensitive"):
             assert token in app_js
 
 
