@@ -1,0 +1,18 @@
+# Hermes LifeSync frontend retirement patch archive
+# Generated during LifeSync retirement closure.
+#
+# Hermes local repo: /Users/vantawork/Documents/Ai/Hermes/agent
+# Hermes branch: fix/memory-governance-locks
+# Hermes HEAD: 3bff8bf8c3e0cfc66922f28a3498d62df04cbe66
+# Hermes remote: https://github.com/NousResearch/hermes-agent.git
+#
+# Note:
+# LifeSync dashboard entry removal was completed locally in Hermes working tree/history,
+# but Hermes upstream remote push remains blocked by 403 permission error.
+# This file is retained in LifeSync archive as a retirement record.
+#
+# Expected local removal scope:
+# - web/src/App.tsx: remove LifeSyncPage import, /lifesync route, LifeSync nav item
+# - web/src/lib/api.ts: remove LifeSync API client methods
+# - web/src/pages/LifeSyncPage.tsx: removed or left unreferenced locally
+# - hermes_state.py: intentionally not modified
